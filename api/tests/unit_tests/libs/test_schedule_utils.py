@@ -88,6 +88,22 @@ class TestCronCompatibility(unittest.TestCase):
                 assert next_time is not None
                 assert validator(next_time), f"Validator failed for {expr}: {next_time}"
 
+    def test_predefined_expressions_with_surrounding_whitespace(self):
+        """Predefined expressions with surrounding whitespace behave like the plain forms."""
+        cases = [
+            (" @daily", "@daily"),
+            ("@daily ", "@daily"),
+            ("  @weekly  ", "@weekly"),
+            ("  @hourly ", "@hourly"),
+            (" 0 9 * * * ", "0 9 * * *"),
+        ]
+
+        for padded, plain in cases:
+            with self.subTest(expr=padded):
+                assert calculate_next_run_at(padded, "UTC", self.base_time) == calculate_next_run_at(
+                    plain, "UTC", self.base_time
+                )
+
     def test_special_characters(self):
         """Test special characters in cron expressions."""
         test_cases = [
