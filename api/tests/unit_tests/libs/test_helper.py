@@ -268,6 +268,25 @@ class TestEmailValidator:
         with pytest.raises(ValueError, match="not a valid email"):
             email("not-an-email")
 
+    def test_leading_dot_in_local_part_rejected(self) -> None:
+        # Regression for #45784: RFC 5322 dot-atom forbids a leading dot.
+        with pytest.raises(ValueError, match="not a valid email"):
+            email(".abc@example.com")
+
+    def test_trailing_dot_in_local_part_rejected(self) -> None:
+        # Regression for #45784: RFC 5322 dot-atom forbids a trailing dot.
+        with pytest.raises(ValueError, match="not a valid email"):
+            email("abc.@example.com")
+
+    def test_consecutive_dots_in_local_part_rejected(self) -> None:
+        # Regression for #45784: RFC 5322 dot-atom forbids consecutive dots.
+        with pytest.raises(ValueError, match="not a valid email"):
+            email("a..b@example.com")
+
+    def test_dotted_local_part_accepted(self) -> None:
+        assert email("a.b@example.com") == "a.b@example.com"
+        assert email("first.last+tag@example.co.uk") == "first.last+tag@example.co.uk"
+
 
 class TestAlphanumericValidator:
     """Tests for the alphanumeric() validator — regression for #39666."""
