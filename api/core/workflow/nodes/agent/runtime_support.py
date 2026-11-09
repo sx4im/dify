@@ -54,6 +54,16 @@ class AgentRuntimeSupport:
             agent_input = node_data.agent_parameters[parameter_name]
             match agent_input.type:
                 case "variable":
+                    if agent_input.value is None:
+                        # Unconfigured optional param: the canvas writes
+                        # {"type": "variable", "value": null} for untouched
+                        # strategy params. Treat it as not provided instead of
+                        # passing a None selector to variable_pool.get, which
+                        # raises TypeError. The strategy already handles None
+                        # for these params (e.g. files defaults to [] and a
+                        # None allowed_tools means no restriction).
+                        result[parameter_name] = None
+                        continue
                     variable = variable_pool.get(agent_input.value)  # type: ignore[arg-type]
                     if variable is None:
                         raise AgentVariableNotFoundError(str(agent_input.value))

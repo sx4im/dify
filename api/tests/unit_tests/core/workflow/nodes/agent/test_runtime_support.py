@@ -405,3 +405,24 @@ def test_build_parameters_keeps_top_level_string_lookup_behaviour():
     )
 
     assert result["query"] == "the user question"
+
+
+def test_build_parameters_treats_null_variable_value_as_unset():
+    """The canvas writes unset optional strategy params as {type: variable, value: null}.
+
+    build_parameters must treat such a param as not provided and pass None through
+    instead of crashing in variable_pool.get, which raises TypeError on a None selector.
+    """
+    result = _build_parameters(
+        configured={
+            "files": {"type": "variable", "value": None},
+            "allowed_tools": {"type": "variable", "value": None},
+        },
+        declared=[
+            _declared_parameter("files", _ParameterType.FILES),
+            _declared_parameter("allowed_tools", _ParameterType.TOOLS_SELECTOR),
+        ],
+        variables={},
+    )
+
+    assert result == {"files": None, "allowed_tools": None}
