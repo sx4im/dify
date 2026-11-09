@@ -405,3 +405,29 @@ def test_build_parameters_keeps_top_level_string_lookup_behaviour():
     )
 
     assert result["query"] == "the user question"
+
+
+def test_build_parameters_treats_null_variable_value_as_not_provided():
+    """A canvas-written {"type": "variable", "value": null} entry must not crash the node.
+
+    Unset optional strategy params (e.g. files / allowed_tools) are stored by the
+    canvas as a variable input with a null value. build_parameters must pass None
+    to the strategy instead of calling variable_pool.get(None).
+    """
+    result = _build_parameters(
+        configured={
+            "files": {"type": "variable", "value": None},
+            "allowed_tools": {"type": "variable", "value": None},
+            "query": {"type": "variable", "value": ["start", "question"]},
+        },
+        declared=[
+            _declared_parameter("files", _ParameterType.FILES),
+            _declared_parameter("allowed_tools", _ParameterType.TOOLS_SELECTOR),
+            _declared_parameter("query", _ParameterType.STRING),
+        ],
+        variables={"question": "hello"},
+    )
+
+    assert result["files"] is None
+    assert result["allowed_tools"] is None
+    assert result["query"] == "hello"

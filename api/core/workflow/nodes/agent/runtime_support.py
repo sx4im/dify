@@ -54,10 +54,17 @@ class AgentRuntimeSupport:
             agent_input = node_data.agent_parameters[parameter_name]
             match agent_input.type:
                 case "variable":
-                    variable = variable_pool.get(agent_input.value)  # type: ignore[arg-type]
-                    if variable is None:
-                        raise AgentVariableNotFoundError(str(agent_input.value))
-                    parameter_value = variable.value
+                    if agent_input.value is None:
+                        # Unset optional parameter: the canvas stores untouched
+                        # strategy params as {"type": "variable", "value": null}.
+                        # A null value means "not provided", so pass None to the
+                        # strategy instead of looking up a selector that does not exist.
+                        parameter_value = None
+                    else:
+                        variable = variable_pool.get(agent_input.value)  # type: ignore[arg-type]
+                        if variable is None:
+                            raise AgentVariableNotFoundError(str(agent_input.value))
+                        parameter_value = variable.value
                 case "mixed" | "constant":
                     parameter_value = self._resolve_template_value(
                         agent_input.value,
@@ -68,7 +75,7 @@ class AgentRuntimeSupport:
                     raise AgentInputTypeError(agent_input.type)
 
             value = parameter_value
-            if parameter.type == "array[tools]":
+            if parameter.type == "array[tools]" and value is not None:
                 value = cast(list[dict[str, Any]], value)
                 value = [tool for tool in value if tool.get("enabled", False)]
                 value = self._filter_mcp_type_tool(strategy, value)
@@ -103,7 +110,7 @@ class AgentRuntimeSupport:
                     tool["parameters"] = parameters
 
             if not for_log:
-                if parameter.type == "array[tools]":
+                if parameter.type == "array[tools]" and value is not None:
                     value = cast(list[dict[str, Any]], value)
                     tool_value = []
                     for tool in value:
@@ -163,7 +170,10 @@ class AgentRuntimeSupport:
                             }
                         )
                     value = tool_value
-                if parameter.type == AgentStrategyParameter.AgentStrategyParameterType.MODEL_SELECTOR:
+                if (
+                    parameter.type == AgentStrategyParameter.AgentStrategyParameterType.MODEL_SELECTOR
+                    and value is not None
+                ):
                     value = cast(dict[str, Any], value)
                     model_instance, model_schema = self.fetch_model(
                         tenant_id=tenant_id,
