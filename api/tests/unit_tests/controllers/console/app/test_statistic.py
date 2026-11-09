@@ -5,9 +5,11 @@ are exercised by the controller integration tests against PostgreSQL. These test
 exercise the real identity and app queries without substituting query services.
 """
 
+import datetime
 from collections.abc import Iterator
 from dataclasses import dataclass
 from http import HTTPStatus
+from types import ModuleType, SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -317,3 +319,60 @@ def test_statistics_treat_blank_date_bounds_as_absent(
     query = query_type(start="", end="")
     assert query.start is None
     assert query.end is None
+
+
+def _fake_account_context(timezone: str) -> SimpleNamespace:
+    return SimpleNamespace(account=SimpleNamespace(timezone=timezone), tenant_id="tenant-1")
+
+
+@pytest.mark.parametrize(
+    ("module", "query_type"),
+    [
+        (statistic, statistic.StatisticTimeRangeQuery),
+        (workflow_statistic, workflow_statistic.WorkflowStatisticQuery),
+    ],
+)
+def test_resolve_statistic_time_range_end_covers_whole_selected_minute(
+    monkeypatch: pytest.MonkeyPatch,
+    module: ModuleType,
+    query_type: type[statistic.StatisticTimeRangeQuery] | type[workflow_statistic.WorkflowStatisticQuery],
+) -> None:
+    """End bound 23:59 must include a message created at 23:59:30 (#45935).
+
+    The statistics repositories filter with `created_at < :end_date`, so the
+    resolver advances the minute-granular end bound by one minute; otherwise
+    the final minute of the selected range is dropped.
+    """
+    monkeypatch.setattr(module, "current_account_with_tenant", lambda: _fake_account_context("Asia/Seoul"))
+
+    start, end, timezone = module._resolve_statistic_time_range(
+        query_type(start="2026-11-09 00:00", end="2026-11-09 23:59")
+    )
+
+    assert timezone == "Asia/Seoul"
+    assert start == datetime.datetime(2026, 11, 8, 15, 0, tzinfo=datetime.UTC)
+    assert end == datetime.datetime(2026, 11, 9, 15, 0, tzinfo=datetime.UTC)
+    message_created_at = datetime.datetime(2026, 11, 9, 14, 59, 30, tzinfo=datetime.UTC)
+    assert start is not None
+    assert end is not None
+    assert start <= message_created_at < end
+
+
+@pytest.mark.parametrize(
+    ("module", "query_type"),
+    [
+        (statistic, statistic.StatisticTimeRangeQuery),
+        (workflow_statistic, workflow_statistic.WorkflowStatisticQuery),
+    ],
+)
+def test_resolve_statistic_time_range_absent_end_stays_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    module: ModuleType,
+    query_type: type[statistic.StatisticTimeRangeQuery] | type[workflow_statistic.WorkflowStatisticQuery],
+) -> None:
+    monkeypatch.setattr(module, "current_account_with_tenant", lambda: _fake_account_context("UTC"))
+
+    start, end, _timezone = module._resolve_statistic_time_range(query_type(start="2026-11-09 00:00", end=None))
+
+    assert start == datetime.datetime(2026, 11, 9, 0, 0, tzinfo=datetime.UTC)
+    assert end is None

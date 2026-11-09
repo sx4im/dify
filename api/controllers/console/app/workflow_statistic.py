@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from uuid import UUID
 
@@ -94,6 +94,13 @@ def _resolve_statistic_time_range(
         start_date, end_date = parse_time_range(req_data.start, req_data.end, timezone)
     except ValueError as error:
         raise InvalidArgumentError(str(error)) from error
+
+    # The end bound is minute-granular user input ("through 23:59"), while the
+    # statistics queries filter with `created_at < :end_date`. Advance the end
+    # by one minute so the whole selected minute is included; otherwise a run
+    # created at 23:59:30 is dropped (see #45935).
+    if end_date is not None:
+        end_date = end_date + timedelta(minutes=1)
 
     return start_date, end_date, timezone
 
