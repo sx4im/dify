@@ -1,6 +1,6 @@
 """Database read model for app monitoring statistics."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import override
 
@@ -31,13 +31,22 @@ def _append_time_range(
     start_date: datetime | None,
     end_date: datetime | None,
 ) -> str:
+    """Append a half-open ``[start_date, end_date)`` filter on ``column``.
+
+    Precondition: ``end_date`` marks the start of the last included minute
+    (time ranges arrive with minute precision, see
+    ``libs.datetime_utils.parse_time_range``), so the exclusive bound is
+    advanced by one minute. Postcondition: every row whose timestamp falls
+    within the requested minutes matches, including the final minute
+    (an end of "23:59" includes rows created at 23:59:30).
+    """
     if start_date is not None:
         sql_query += f" AND {column} >= :start_date"
         parameters["start_date"] = start_date
 
     if end_date is not None:
         sql_query += f" AND {column} < :end_date"
-        parameters["end_date"] = end_date
+        parameters["end_date"] = end_date + timedelta(minutes=1)
 
     return sql_query
 

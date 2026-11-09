@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast, override
 
@@ -125,8 +125,34 @@ def test_app_statistic_repository_maps_results_and_preserves_query_scope(
             "app_id": "app-1",
             "excluded_invoke_from": InvokeFrom.DEBUGGER,
             "start_date": start_date,
-            "end_date": end_date,
+            # The end bound is exclusive at the end of the specified minute.
+            "end_date": end_date + timedelta(minutes=1),
         }
+
+
+def test_daily_messages_include_the_final_minute_of_the_end_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for #45935: an end of "23:59" must include 23:59:30."""
+    monkeypatch.setattr(repository_module, "convert_datetime_to_date", lambda field: field)
+    repository = _RecordingRepository()
+    start_date = datetime(2026, 11, 9, 0, 0, tzinfo=UTC)
+    end_date = datetime(2026, 11, 9, 23, 59, tzinfo=UTC)
+
+    repository.rows = (_row(date="2026-11-09", message_count=1),)
+    assert repository.get_daily_messages(
+        app_id="app-1",
+        start_date=start_date,
+        end_date=end_date,
+        timezone="Asia/Seoul",
+    ) == (DailyMessageStatisticRecord(date="2026-11-09", message_count=1),)
+
+    sql_query, parameters = repository.calls[0]
+    assert "created_at < :end_date" in sql_query
+    assert parameters["end_date"] == datetime(2026, 11, 10, 0, 0, tzinfo=UTC)
+    # A message created at 23:59:30 falls inside [start_date, end_date).
+    message_created_at = datetime(2026, 11, 9, 23, 59, 30, tzinfo=UTC)
+    assert start_date <= message_created_at < parameters["end_date"]
 
 
 def test_daily_messages_omit_time_range_when_not_provided(
