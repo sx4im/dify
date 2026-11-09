@@ -13,10 +13,16 @@ const asAttachmentParamPattern = /[?&]as_attachment=/
 const withFilePreviewAttachment = (href: string) => {
   if (!filePreviewPathPattern.test(href) || asAttachmentParamPattern.test(href)) return href
 
-  const url = new URL(href, 'http://dify.local')
-  url.searchParams.set('as_attachment', 'true')
+  try {
+    const url = new URL(href, 'http://dify.local')
+    url.searchParams.set('as_attachment', 'true')
 
-  return href.startsWith('//') ? url.href.replace(url.protocol, '') : url.href
+    return href.startsWith('//') ? url.href.replace(url.protocol, '') : url.href
+  } catch {
+    // Attachment mode is best-effort: a malformed URL keeps its original href
+    // so the conversation stays usable instead of crashing the render.
+    return href
+  }
 }
 
 const Link = ({ node, children, ...props }: any) => {

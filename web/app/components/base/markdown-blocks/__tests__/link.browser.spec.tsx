@@ -134,3 +134,38 @@ it('adds attachment mode once while preserving file-preview URL shape', async ()
       '//localhost:5001/files/123/file-preview?timestamp=1&as_attachment=true#page',
     )
 })
+
+it('keeps malformed file-preview URLs as normal links instead of crashing', async () => {
+  const screen = await render(
+    <div>
+      <Link
+        node={{
+          properties: {
+            href: 'http://host.example:99999/files/abc123/file-preview?timestamp=1&nonce=2&sign=3',
+          },
+        }}
+      >
+        Out-of-range port
+      </Link>
+      <Link
+        node={{
+          properties: {
+            href: 'http://[::1/files/abc123/file-preview?timestamp=1',
+          },
+        }}
+      >
+        Unclosed IPv6 host
+      </Link>
+    </div>,
+  )
+
+  await expect
+    .element(screen.getByRole('link', { name: 'Out-of-range port' }))
+    .toHaveAttribute(
+      'href',
+      'http://host.example:99999/files/abc123/file-preview?timestamp=1&nonce=2&sign=3',
+    )
+  await expect
+    .element(screen.getByRole('link', { name: 'Unclosed IPv6 host' }))
+    .toHaveAttribute('href', 'http://[::1/files/abc123/file-preview?timestamp=1')
+})
