@@ -1,6 +1,7 @@
 import { Dialog, DialogPopup, DialogPortal, DialogTitle } from '@langgenius/dify-ui/dialog'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useState } from 'react'
 import { gotoAnythingDialogHandle } from '@/app/components/goto-anything/handles'
 import { renderWithConsoleQuery as render } from '@/test/console/query-data'
 import { AppDetailTop } from '../app-detail-top'
@@ -15,6 +16,11 @@ function TestGotoAnythingDialog() {
       </DialogPortal>
     </Dialog>
   )
+}
+
+function AppSidebarTopOwner() {
+  const [expanded, setExpanded] = useState(true)
+  return <AppDetailTop expand={expanded} onToggle={() => setExpanded((value) => !value)} />
 }
 
 describe('AppDetailTop', () => {
@@ -59,5 +65,18 @@ describe('AppDetailTop', () => {
     await user.click(screen.getByRole('button', { name: 'layout.sidebar.collapseSidebar' }))
 
     expect(onToggle).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps keyboard focus on the toggle when collapsing and expanding', async () => {
+    const user = userEvent.setup()
+    render(<AppSidebarTopOwner />)
+
+    await user.click(screen.getByRole('button', { name: 'layout.sidebar.collapseSidebar' }))
+    const expand = screen.getByRole('button', { name: 'layout.sidebar.expandSidebar' })
+    expect(expand).toHaveFocus()
+
+    await user.click(expand)
+    expect(screen.getByRole('button', { name: 'layout.sidebar.collapseSidebar' })).toHaveFocus()
+    expect(screen.getByRole('link', { name: 'navigation.menus.apps' })).toBeVisible()
   })
 })

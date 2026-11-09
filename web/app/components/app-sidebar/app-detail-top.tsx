@@ -11,6 +11,7 @@ import { DialogTrigger } from '@langgenius/dify-ui/dialog'
 import { Kbd, KbdGroup } from '@langgenius/dify-ui/kbd'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@langgenius/dify-ui/tooltip'
 import { formatForDisplay } from '@tanstack/react-hotkeys'
+import { useLayoutEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useStudioListHref } from '@/app/components/apps/list-navigation-state'
 import { DetailSidebarToggleButton } from '@/app/components/detail-sidebar/toggle-button'
@@ -26,18 +27,34 @@ type AppDetailTopProps = {
 export function AppDetailTop({ expand = true, onToggle }: AppDetailTopProps) {
   const { t } = useTranslation(['app', 'navigation'])
   const appsHref = useStudioListHref('/apps')
+  const toggleWrapperRef = useRef<HTMLSpanElement>(null)
+  const previousExpandRef = useRef(expand)
+
+  // Collapsing unmounts the focused toggle, so focus falls back to the body.
+  // Move it to the replacement toggle so the keyboard journey can continue.
+  useLayoutEffect(() => {
+    const wasExpanded = previousExpandRef.current
+    previousExpandRef.current = expand
+    if (wasExpanded === expand || document.activeElement !== document.body) return
+    toggleWrapperRef.current?.querySelector('button')?.focus()
+  }, [expand])
 
   if (!expand) {
     return (
       <div className="flex w-full items-center justify-center px-3 pt-2 pb-1">
         {onToggle && (
-          <DetailSidebarToggleButton
-            expand={expand}
-            onToggle={onToggle}
-            icon={
-              <span aria-hidden className="i-custom-vender-line-arrows-sidebar-left-arrow size-4" />
-            }
-          />
+          <span ref={toggleWrapperRef} className="flex shrink-0">
+            <DetailSidebarToggleButton
+              expand={expand}
+              onToggle={onToggle}
+              icon={
+                <span
+                  aria-hidden
+                  className="i-custom-vender-line-arrows-sidebar-left-arrow size-4"
+                />
+              }
+            />
+          </span>
         )}
       </div>
     )
@@ -101,13 +118,15 @@ export function AppDetailTop({ expand = true, onToggle }: AppDetailTopProps) {
         </Tooltip>
       )}
       {onToggle && (
-        <DetailSidebarToggleButton
-          expand={expand}
-          onToggle={onToggle}
-          icon={
-            <span aria-hidden className="i-custom-vender-line-arrows-sidebar-left-arrow size-4" />
-          }
-        />
+        <span ref={toggleWrapperRef} className="flex shrink-0">
+          <DetailSidebarToggleButton
+            expand={expand}
+            onToggle={onToggle}
+            icon={
+              <span aria-hidden className="i-custom-vender-line-arrows-sidebar-left-arrow size-4" />
+            }
+          />
+        </span>
       )}
     </div>
   )

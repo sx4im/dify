@@ -1,6 +1,7 @@
 import { Dialog, DialogPopup, DialogPortal, DialogTitle } from '@langgenius/dify-ui/dialog'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useState } from 'react'
 import { gotoAnythingDialogHandle } from '@/app/components/goto-anything/handles'
 import { DatasetDetailTop } from '../dataset-detail-top'
 
@@ -14,6 +15,11 @@ function TestGotoAnythingDialog() {
       </DialogPortal>
     </Dialog>
   )
+}
+
+function DatasetSidebarTopOwner() {
+  const [expanded, setExpanded] = useState(true)
+  return <DatasetDetailTop expand={expanded} onToggle={() => setExpanded((value) => !value)} />
 }
 
 describe('DatasetDetailTop', () => {
@@ -58,5 +64,18 @@ describe('DatasetDetailTop', () => {
     await user.click(screen.getByRole('button', { name: 'layout.sidebar.expandSidebar' }))
 
     expect(onToggle).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps keyboard focus on the toggle when collapsing and expanding', async () => {
+    const user = userEvent.setup()
+    render(<DatasetSidebarTopOwner />)
+
+    await user.click(screen.getByRole('button', { name: 'layout.sidebar.collapseSidebar' }))
+    const expand = screen.getByRole('button', { name: 'layout.sidebar.expandSidebar' })
+    expect(expand).toHaveFocus()
+
+    await user.click(expand)
+    expect(screen.getByRole('button', { name: 'layout.sidebar.collapseSidebar' })).toHaveFocus()
+    expect(screen.getByRole('link', { name: 'navigation.menus.datasets' })).toBeVisible()
   })
 })
