@@ -3,6 +3,10 @@ import { screen } from '@testing-library/react'
 import { renderWithConsoleQuery as render } from '@/test/console/query-data'
 import StreamdownWrapper from '../streamdown-wrapper'
 
+// 1x1 transparent PNG as a data: URI (issue #45920).
+const DATA_IMAGE =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAwMCAO+ip1sAAAAASUVORK5CYII='
+
 const TILDE_RANGE_RE = /0\.3~8mm/
 
 vi.mock('@/app/components/base/markdown-blocks/code-block', () => ({
@@ -45,6 +49,13 @@ describe('StreamdownWrapper', () => {
         'src',
         'https://example.com/img.png',
       )
+    })
+
+    it('should NOT render a data: image when ALLOW_UNSAFE_DATA_SCHEME is off (issue #45920)', () => {
+      // The flag defaults to false, so a base64 image stays blocked.
+      render(<StreamdownWrapper latexContent={`![data-img](${DATA_IMAGE})`} />)
+
+      expect(screen.queryByTestId('gallery-image')).not.toBeInTheDocument()
     })
 
     it('should render a CodeBlock component for code markdown', async () => {

@@ -17,7 +17,7 @@ import {
   ThinkBlock,
   VideoBlock,
 } from '@/app/components/base/markdown-blocks'
-import { ALLOW_INLINE_STYLES, ENABLE_SINGLE_DOLLAR_LATEX } from '@/config'
+import { ALLOW_INLINE_STYLES, ALLOW_UNSAFE_DATA_SCHEME, ENABLE_SINGLE_DOLLAR_LATEX } from '@/config'
 import { customUrlTransform } from './markdown-utils'
 import 'katex/dist/katex.min.css'
 
@@ -32,6 +32,7 @@ type SanitizeSchema = {
   required?: Record<string, Record<string, unknown>>
   clobber?: string[]
   clobberPrefix?: string
+  protocols?: Record<string, string[] | null | undefined>
   [key: string]: unknown
 }
 
@@ -144,12 +145,23 @@ function buildRehypePlugins(extraPlugins?: PluggableList, isPlugin = false): Plu
     mergedAttributes['*'] = [...globalAttrs, 'style']
   }
 
+  // The default sanitize schema only allows http(s) URL protocols, so a
+  // data: image is stripped even when ALLOW_UNSAFE_DATA_SCHEME lets it
+  // through customUrlTransform (langgenius/dify#45920). Mirror the flag here.
+  // Only src is extended: rehype-harden blocks data: links unconditionally
+  // (no opt-in), so extending href would change nothing for links.
+  const protocols: Record<string, string[] | null | undefined> = {
+    ...(defaultSanitizeSchema.protocols ?? {}),
+  }
+  if (ALLOW_UNSAFE_DATA_SCHEME) protocols.src = [...(protocols.src ?? []), 'data']
+
   const customSchema: SanitizeSchema = {
     ...defaultSanitizeSchema,
     tagNames: [...tagNamesSet],
     attributes: mergedAttributes,
     required: requiredRest,
     clobber,
+    protocols,
   }
 
   return [
