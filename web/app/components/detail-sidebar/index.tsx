@@ -134,7 +134,7 @@ export function DetailSidebarFrame({
   return (
     <div
       className={cn(
-        'relative flex h-full w-16 min-w-0 shrink-0 bg-background-body p-1 transition-[width] motion-reduce:transition-none',
+        'relative flex w-16 min-w-0 shrink-0 bg-background-body p-1 transition-[width] motion-reduce:transition-none',
         !compact && 'data-[sidebar-view=expanded]:w-62',
         className,
       )}
