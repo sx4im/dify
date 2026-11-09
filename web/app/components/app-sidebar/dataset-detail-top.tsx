@@ -11,6 +11,7 @@ import { DialogTrigger } from '@langgenius/dify-ui/dialog'
 import { Kbd, KbdGroup } from '@langgenius/dify-ui/kbd'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@langgenius/dify-ui/tooltip'
 import { formatForDisplay } from '@tanstack/react-hotkeys'
+import { useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { DetailSidebarToggleButton } from '@/app/components/detail-sidebar/toggle-button'
 import { gotoAnythingDialogHandle } from '@/app/components/goto-anything/handles'
@@ -24,14 +25,46 @@ type DatasetDetailTopProps = {
 
 export function DatasetDetailTop({ expand = true, onToggle }: DatasetDetailTopProps) {
   const { t } = useTranslation(['app', 'navigation'])
+  const collapseButtonRef = useRef<HTMLButtonElement>(null)
+  const expandButtonRef = useRef<HTMLButtonElement>(null)
+  // The toggle unmounts when the sidebar flips, so remember which toggle held
+  // focus before the flip and hand focus to its replacement when it mounts.
+  const pendingFocusRef = useRef<'collapse' | 'expand' | null>(null)
+
+  const handleToggle = useCallback(() => {
+    if (document.activeElement === collapseButtonRef.current)
+      pendingFocusRef.current = 'expand'
+    else if (document.activeElement === expandButtonRef.current)
+      pendingFocusRef.current = 'collapse'
+    else
+      pendingFocusRef.current = null
+    onToggle?.()
+  }, [onToggle])
+
+  const focusCollapseButton = useCallback((node: HTMLButtonElement | null) => {
+    collapseButtonRef.current = node
+    if (node && pendingFocusRef.current === 'collapse') {
+      node.focus()
+      pendingFocusRef.current = null
+    }
+  }, [])
+
+  const focusExpandButton = useCallback((node: HTMLButtonElement | null) => {
+    expandButtonRef.current = node
+    if (node && pendingFocusRef.current === 'expand') {
+      node.focus()
+      pendingFocusRef.current = null
+    }
+  }, [])
 
   if (!expand) {
     return (
       <div className="flex w-full items-center justify-center px-3 pt-2 pb-1">
         {onToggle && (
           <DetailSidebarToggleButton
+            ref={focusExpandButton}
             expand={expand}
-            onToggle={onToggle}
+            onToggle={handleToggle}
             icon={
               <span aria-hidden className="i-custom-vender-line-arrows-sidebar-left-arrow size-4" />
             }
@@ -103,8 +136,9 @@ export function DatasetDetailTop({ expand = true, onToggle }: DatasetDetailTopPr
       )}
       {onToggle && (
         <DetailSidebarToggleButton
+          ref={focusCollapseButton}
           expand={expand}
-          onToggle={onToggle}
+          onToggle={handleToggle}
           icon={
             <span aria-hidden className="i-custom-vender-line-arrows-sidebar-left-arrow size-4" />
           }

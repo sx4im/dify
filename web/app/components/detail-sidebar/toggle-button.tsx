@@ -11,6 +11,7 @@ type DetailSidebarToggleButtonProps = {
   onToggle: () => void
   className?: string
   icon?: ReactNode
+  ref?: React.Ref<HTMLButtonElement>
 }
 
 export function DetailSidebarToggleButton({
@@ -18,6 +19,7 @@ export function DetailSidebarToggleButton({
   onToggle,
   className,
   icon,
+  ref,
 }: DetailSidebarToggleButtonProps) {
   const { t } = useTranslation(['layout'])
   const label = expand
@@ -28,7 +30,13 @@ export function DetailSidebarToggleButton({
     <Tooltip>
       <TooltipTrigger
         render={
-          <IconButton size="lg" aria-label={label} onClick={onToggle} className={className}>
+          <IconButton
+            ref={ref}
+            size="lg"
+            aria-label={label}
+            onClick={onToggle}
+            className={className}
+          >
             <span aria-hidden className="inline-flex">
               {icon ??
                 (expand ? (

@@ -1,6 +1,7 @@
 import { Dialog, DialogPopup, DialogPortal, DialogTitle } from '@langgenius/dify-ui/dialog'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useState } from 'react'
 import { gotoAnythingDialogHandle } from '@/app/components/goto-anything/handles'
 import { renderWithConsoleQuery as render } from '@/test/console/query-data'
 import { AppDetailTop } from '../app-detail-top'
@@ -59,5 +60,37 @@ describe('AppDetailTop', () => {
     await user.click(screen.getByRole('button', { name: 'layout.sidebar.collapseSidebar' }))
 
     expect(onToggle).toHaveBeenCalledTimes(1)
+  })
+
+  it('moves focus to the expand button when the focused collapse button unmounts', async () => {
+    const user = userEvent.setup()
+    function ControlledAppDetailTop() {
+      const [expand, setExpand] = useState(true)
+      return <AppDetailTop expand={expand} onToggle={() => setExpand((value) => !value)} />
+    }
+
+    render(<ControlledAppDetailTop />)
+
+    const collapseButton = screen.getByRole('button', { name: 'layout.sidebar.collapseSidebar' })
+    collapseButton.focus()
+    await user.keyboard('{Enter}')
+
+    expect(screen.getByRole('button', { name: 'layout.sidebar.expandSidebar' })).toHaveFocus()
+  })
+
+  it('moves focus to the collapse button when the focused expand button unmounts', async () => {
+    const user = userEvent.setup()
+    function ControlledAppDetailTop() {
+      const [expand, setExpand] = useState(false)
+      return <AppDetailTop expand={expand} onToggle={() => setExpand((value) => !value)} />
+    }
+
+    render(<ControlledAppDetailTop />)
+
+    const expandButton = screen.getByRole('button', { name: 'layout.sidebar.expandSidebar' })
+    expandButton.focus()
+    await user.keyboard('{Enter}')
+
+    expect(screen.getByRole('button', { name: 'layout.sidebar.collapseSidebar' })).toHaveFocus()
   })
 })
