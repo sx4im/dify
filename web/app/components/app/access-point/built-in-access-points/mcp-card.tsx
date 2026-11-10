@@ -31,6 +31,7 @@ import { getPublishedWorkflowNodes, isAdvancedApp } from '../shared/utils'
 type MCPAccessPointCardProps = {
   appInfo: AppDetailWithSite
   canManageAccessPoint: boolean
+  canViewServerDetail: boolean
   highlighted?: boolean
   availability: AccessPointAvailability
   workflow: PublishedWorkflow
@@ -39,6 +40,7 @@ type MCPAccessPointCardProps = {
 export function MCPAccessPointCard({
   appInfo,
   canManageAccessPoint,
+  canViewServerDetail,
   highlighted,
   availability,
   workflow,
@@ -53,10 +55,17 @@ export function MCPAccessPointCard({
   const queryClient = useQueryClient()
   const serverDetailQueryOptions = consoleQuery.apps.byAppId.server.get.queryOptions({
     input: { params: { app_id: appInfo.id } },
-    enabled: Boolean(appInfo.id),
+    // The server detail endpoint requires layout access when RBAC is enabled, so do not
+    // request it for members who cannot view the layout — the 403 would surface as a
+    // permission error on the Access Point page. Without RBAC the endpoint admits every
+    // signed-in member, so the detail is still fetched for them.
+    enabled: canViewServerDetail && Boolean(appInfo.id),
     select: selectMCPServerDetail,
   })
-  const { data: detail, isPending: serverDetailLoading } = useQuery(serverDetailQueryOptions)
+  // NB: `isLoading` (not `isPending`) — a disabled query never fetches and stays
+  // `pending` forever, which would leave this card stuck in its loading state for
+  // members who may not view the server detail.
+  const { data: detail, isLoading: serverDetailLoading } = useQuery(serverDetailQueryOptions)
   const invalidateServerDetail = () =>
     queryClient.invalidateQueries({ queryKey: serverDetailQueryOptions.queryKey })
   const updateServerMutation = useMutation(

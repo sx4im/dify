@@ -165,6 +165,7 @@ export function BuiltInAccessPoints({
         <MCPAccessPointCard
           appInfo={appInfo}
           canManageAccessPoint={canManageAccessPoint}
+          canViewServerDetail={!systemFeatures.rbac_enabled || canViewLayout}
           workflow={workflow}
           availability={mcpAvailability}
           highlighted={highlightedAccessPoint === 'mcp'}

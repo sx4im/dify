@@ -97,8 +97,17 @@ function renderAccessPoints({
           )
         : Response.json(workflow)
     }
-    if (path === '/apps/app-1/server')
-      return Response.json({ id: 'server-1', server_code: 'server-code', status: 'active' })
+    if (path === '/apps/app-1/server') {
+      return rbacEnabled && !canViewLayout
+        ? Response.json(
+            {
+              code: 'forbidden',
+              message: "You don't have the permission to access the requested resource.",
+            },
+            { status: 403 },
+          )
+        : Response.json({ id: 'server-1', server_code: 'server-code', status: 'active' })
+    }
     if (path === '/apps/app-1/triggers') return triggerResponse ?? Response.json({ data: triggers })
     throw new Error(`Unexpected request: ${request.method} ${path}`)
   })
@@ -226,6 +235,18 @@ it('honors RBAC layout access even for a Normal workspace member', async () => {
 
   await waitFor(() => expect(within(getMcpCard()).getByText(inService)).toBeInTheDocument())
   expect(paths.filter((path) => path === publishedPath)).toHaveLength(1)
+  expect(toast.error).not.toHaveBeenCalled()
+})
+
+it('does not request the MCP server detail for a Normal member without layout access', async () => {
+  const paths = renderAccessPoints({
+    mode: 'advanced-chat',
+    rbacEnabled: true,
+    canViewLayout: false,
+  })
+
+  await waitFor(() => expect(getMcpCard()).not.toHaveAttribute('aria-busy', 'true'))
+  expect(paths).not.toContain('/apps/app-1/server')
   expect(toast.error).not.toHaveBeenCalled()
 })
 
