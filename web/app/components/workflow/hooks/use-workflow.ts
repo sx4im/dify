@@ -455,14 +455,16 @@ const useNodesReadOnlyBase = (canEdit: boolean) => {
   const workflowRunningData = useStore((s) => s.workflowRunningData)
   const historyWorkflowData = useStore((s) => s.historyWorkflowData)
   const isRestoring = useStore((s) => s.isRestoring)
+  const isGraphReady = useStore((s) => s.isGraphReady)
 
   const getNodesReadOnly = useCallback((): boolean => {
-    const { workflowRunningData, historyWorkflowData, isRestoring, canvasReadOnly } =
+    const { workflowRunningData, historyWorkflowData, isRestoring, canvasReadOnly, isGraphReady } =
       workflowStore.getState()
 
     return !!(
       canvasReadOnly ||
       !canEdit ||
+      !isGraphReady ||
       workflowRunningData?.result.status === WorkflowRunningStatus.Running ||
       workflowRunningData?.result.status === WorkflowRunningStatus.Paused ||
       historyWorkflowData ||
@@ -474,6 +476,7 @@ const useNodesReadOnlyBase = (canEdit: boolean) => {
     nodesReadOnly: !!(
       canvasReadOnly ||
       !canEdit ||
+      !isGraphReady ||
       workflowRunningData?.result.status === WorkflowRunningStatus.Running ||
       workflowRunningData?.result.status === WorkflowRunningStatus.Paused ||
       historyWorkflowData ||

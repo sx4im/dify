@@ -255,6 +255,16 @@ export const Workflow: FC<WorkflowProps> = memo(
       )
     }, [edges, nodes, setEdges, setNodes, store])
 
+    // While the collaboration session cannot accept local mutations (still
+    // connecting, reconnecting, or waiting for its CRDT snapshot), node updates
+    // are silently dropped by the collaboration layer. Mirror that state into
+    // the read-only flag so the editor cannot accept keystrokes it would lose.
+    useEffect(() => {
+      return collaborationManager.onGraphReadyChange((isReady) => {
+        workflowStore.getState().setIsGraphReady(isReady)
+      })
+    }, [workflowStore])
+
     useEffect(() => {
       return collaborationManager.onHistoryAction(() => {
         toast.info(t(($) => $['collaboration.historyAction.generic'], { ns: 'workflow' }))

@@ -4,7 +4,7 @@ import { createNode, createWorkflowRunningData } from '../../__tests__/fixtures'
 import { renderWorkflowFlowHook } from '../../__tests__/workflow-test-env'
 import { useNodeDataUpdate } from '../use-node-data-update'
 
-const setup = (readonly = false) => {
+const setup = (readonly = false, extraStoreState: Record<string, unknown> = {}) => {
   const sync = vi.fn().mockResolvedValue(undefined)
   const rendered = renderWorkflowFlowHook(
     () => ({ ...useNodeDataUpdate(), nodes: useNodes<{ value: string }>() }),
@@ -14,7 +14,10 @@ const setup = (readonly = false) => {
         createNode({ id: 'node-2', data: { title: 'Node 2', value: 'untouched' } }),
       ],
       hooksStoreProps: { doSyncWorkflowDraft: sync },
-      initialStoreState: readonly ? { workflowRunningData: createWorkflowRunningData() } : {},
+      initialStoreState: {
+        ...(readonly ? { workflowRunningData: createWorkflowRunningData() } : {}),
+        ...extraStoreState,
+      },
     },
   )
   return { ...rendered, sync }
@@ -62,6 +65,17 @@ it('updates the graph and immediately saves with the requested error policy and 
   )
   expect(result.current.nodes.find((node) => node.id === 'node-1')?.data.value).toBe('saved')
   expect(sync).toHaveBeenCalledExactlyOnceWith(true, callback)
+})
+
+it('does not apply node edits while the collaboration graph is not ready', async () => {
+  const { result, store, sync } = setup(false, { isGraphReady: false })
+  await waitFor(() => expect(result.current.nodes).toHaveLength(2))
+  act(() =>
+    result.current.handleNodeDataUpdateWithSyncDraft({ id: 'node-1', data: { value: 'lost' } }),
+  )
+  act(() => store.getState().flushPendingSync())
+  expect(result.current.nodes.find((node) => node.id === 'node-1')?.data.value).toBe('original')
+  expect(sync).not.toHaveBeenCalled()
 })
 
 it('preserves graph data and does not schedule a save while the workflow is running', async () => {

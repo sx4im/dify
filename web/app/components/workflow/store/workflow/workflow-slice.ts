@@ -33,6 +33,12 @@ export type WorkflowSliceShape = {
   setIsListening: (listening: boolean) => void
   canvasReadOnly: boolean
   setCanvasReadOnly: (readOnly: boolean) => void
+  // Whether the collaboration graph can currently accept local mutations.
+  // True when collaboration is disabled or no session exists; the collaboration
+  // manager reports false while it is still connecting, reconnecting, or
+  // waiting for its CRDT snapshot, during which local node updates are dropped.
+  isGraphReady: boolean
+  setIsGraphReady: (isGraphReady: boolean) => void
   listeningTriggerType: TriggerNodeType | null
   setListeningTriggerType: (triggerType: TriggerNodeType | null) => void
   listeningTriggerNodeId: string | null
@@ -79,6 +85,8 @@ export const createWorkflowSlice: StateCreator<WorkflowSliceShape> = (set) => ({
   setIsListening: (listening) => set(() => ({ isListening: listening })),
   canvasReadOnly: false,
   setCanvasReadOnly: (canvasReadOnly) => set(() => ({ canvasReadOnly })),
+  isGraphReady: true,
+  setIsGraphReady: (isGraphReady) => set(() => ({ isGraphReady })),
   listeningTriggerType: null,
   setListeningTriggerType: (triggerType) => set(() => ({ listeningTriggerType: triggerType })),
   listeningTriggerNodeId: null,
