@@ -532,6 +532,62 @@ describe('useNodesSyncDraft', () => {
     })
   })
 
+  describe('queued sync freshness', () => {
+    it('posts edits typed while an earlier sync is in flight instead of the captured snapshot', async () => {
+      const finishEarlierSave = createDeferred<{ hash: string; updated_at: number }>()
+      mockSyncWorkflowDraft.mockImplementationOnce(() => finishEarlierSave.promise)
+      const llmNode = createNode({
+        id: 'llm',
+        data: {
+          type: BlockEnum.LLM,
+          title: 'LLM',
+          prompt_template: [{ role: 'system', text: 'first prompt' }],
+        },
+      })
+      const editedLlmNode = createNode({
+        id: 'llm',
+        data: {
+          type: BlockEnum.LLM,
+          title: 'LLM',
+          prompt_template: [{ role: 'system', text: 'edited prompt after continuous typing' }],
+        },
+      })
+      const { result, setCanvas } = renderUseNodesSyncDraft({ nodes: [llmNode] })
+
+      let earlierSave!: ReturnType<typeof result.current.doSyncWorkflowDraft>
+      let queuedSave!: ReturnType<typeof result.current.doSyncWorkflowDraft>
+      await act(async () => {
+        earlierSave = result.current.doSyncWorkflowDraft()
+        queuedSave = result.current.doSyncWorkflowDraft()
+      })
+      expect(mockSyncWorkflowDraft).toHaveBeenCalledOnce()
+
+      // Edits typed while the earlier save is still in flight.
+      act(() => {
+        setCanvas({ nodes: [editedLlmNode] })
+      })
+
+      await act(async () => {
+        finishEarlierSave.resolve({ hash: 'earlier-save', updated_at: 1 })
+        await earlierSave
+        await queuedSave
+      })
+
+      expect(mockSyncWorkflowDraft).toHaveBeenCalledTimes(2)
+      const queuedCall = mockSyncWorkflowDraft.mock.calls[1]![0] as {
+        params: {
+          graph: {
+            nodes: Array<{ id: string; data: { prompt_template?: Array<{ text: string }> } }>
+          }
+        }
+      }
+      const postedLlm = queuedCall.params.graph.nodes.find((node) => node.id === 'llm')
+      expect(postedLlm?.data.prompt_template?.[0]?.text).toBe(
+        'edited prompt after continuous typing',
+      )
+    })
+  })
+
   describe('empty graph confirmation', () => {
     it.each([
       { scenario: 'no nodes', nodes: [] },

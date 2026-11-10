@@ -264,13 +264,30 @@ const useNodesSyncDraftBase = (getNodesReadOnly: () => boolean) => {
 
       const { setSyncWorkflowDraftHash, setDraftUpdatedAt } = workflowStore.getState()
 
+      // A queued sync carries the graph captured when it was requested, but edits
+      // typed while an earlier sync is in flight are already in the canvas by the
+      // time this one posts. Persisting the captured snapshot would regress the
+      // stored draft to the older prompt. Re-read the canvas right before posting
+      // so a queued save never overwrites newer edits — unless the canvas was
+      // torn down (route unmount clears ReactFlow), in which case the fresh read
+      // is empty and the captured graph is the only draft left to save.
+      const freshParams = getPostParams()
+      const paramsToPost =
+        freshParams &&
+        freshParams.url === baseParams.url &&
+        !isEmptyGraph(freshParams.params.graph)
+          ? freshParams.params
+          : baseParams.params
+      const graphToPost = paramsToPost.graph
+      const postingEmptyGraph = isEmptyGraph(graphToPost)
+
       try {
         const latestHash = workflowStore.getState().syncWorkflowDraftHash
 
         const body = {
-          ...baseParams.params,
+          ...paramsToPost,
           hash: latestHash || null,
-          ...(emptyGraph ? { force: true } : {}),
+          ...(postingEmptyGraph ? { force: true } : {}),
           ...(options?.environmentVariablePatch
             ? {
                 environment_variable_patch: {
@@ -298,7 +315,7 @@ const useNodesSyncDraftBase = (getNodesReadOnly: () => boolean) => {
           return null
         }
 
-        setSyncWorkflowDraftHash(res.hash, baseParams.params.graph)
+        setSyncWorkflowDraftHash(res.hash, graphToPost)
         setDraftUpdatedAt(res.updated_at)
         callback?.onSuccess?.()
         return { hash: res.hash, updatedAt: res.updated_at }
