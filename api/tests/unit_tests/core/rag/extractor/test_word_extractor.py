@@ -3,7 +3,10 @@
 import io
 import logging
 import os
+import shutil
+import subprocess
 import tempfile
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol, cast
@@ -901,3 +904,178 @@ def test_extract_ignores_non_image_relationship_with_image_in_target(
     assert content == "Visible text"
     assert sqlite_session.scalars(select(UploadFile)).all() == []
     assert not local_image_storage.exists("image_files/")
+
+
+# --- dify#46063: malformed DOCX packages and legacy .doc files renamed to .docx ---
+
+_STRICT_NAMESPACE_MAP = [
+    (
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "http://purl.oclc.org/ooxml/wordprocessingml/main",
+    ),
+    (
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships",
+    ),
+    (
+        "http://schemas.openxmlformats.org/package/2006/relationships",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships",
+    ),
+    (
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument",
+    ),
+]
+
+
+def _build_hello_docx(path: Path) -> None:
+    doc = Document()
+    doc.add_paragraph("Hello DOCX")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "A"
+    table.cell(0, 1).text = "B"
+    table.cell(1, 0).text = "C"
+    table.cell(1, 1).text = "D"
+    doc.save(str(path))
+
+
+def _rewrite_docx_zip(src: Path, dst: Path, transform) -> None:
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            keep, new_data = transform(item.filename, data)
+            if keep:
+                zout.writestr(item, new_data)
+
+
+def _to_strict_namespaces(filename: str, data: bytes):
+    if filename.endswith(".xml") or filename.endswith(".rels"):
+        text = data.decode("utf-8")
+        for old, new in _STRICT_NAMESPACE_MAP:
+            text = text.replace(old, new)
+        return True, text.encode("utf-8")
+    return True, data
+
+
+def _drop_root_rels(filename: str, data: bytes):
+    if filename == "_rels/.rels":
+        return False, data
+    return True, data
+
+
+def test_parse_docx_falls_back_to_direct_xml_on_strict_namespaces(tmp_path: Path) -> None:
+    valid = tmp_path / "valid.docx"
+    _build_hello_docx(valid)
+    strict = tmp_path / "strict.docx"
+    _rewrite_docx_zip(valid, strict, _to_strict_namespaces)
+
+    # python-docx cannot open the Strict-namespaced package at all.
+    with pytest.raises(AttributeError):
+        Document(str(strict))
+
+    extractor = object.__new__(WordExtractor)
+    content = extractor.parse_docx(str(strict))
+
+    assert content == "Hello DOCX\n| A | B |\n| --- | --- |\n| C | D |"
+
+
+def test_parse_docx_falls_back_when_root_rels_missing(tmp_path: Path) -> None:
+    valid = tmp_path / "valid.docx"
+    _build_hello_docx(valid)
+    stripped = tmp_path / "stripped.docx"
+    _rewrite_docx_zip(valid, stripped, _drop_root_rels)
+
+    with pytest.raises(KeyError, match="officeDocument"):
+        Document(str(stripped))
+
+    extractor = object.__new__(WordExtractor)
+    content = extractor.parse_docx(str(stripped))
+
+    assert content == "Hello DOCX\n| A | B |\n| --- | --- |\n| C | D |"
+
+
+@pytest.mark.skipif(shutil.which("soffice") is None, reason="LibreOffice is required to build a legacy .doc fixture")
+def test_parse_docx_converts_legacy_doc_renamed_to_docx(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    valid = tmp_path / "valid.docx"
+    _build_hello_docx(valid)
+    outdir = tmp_path / "lo-out"
+    outdir.mkdir()
+    result = subprocess.run(
+        [
+            shutil.which("soffice"),
+            "--headless",
+            f"-env:UserInstallation=file://{tmp_path / 'soffice-profile'}",
+            "--convert-to",
+            "doc",
+            "--outdir",
+            str(outdir),
+            str(valid),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0
+    legacy_doc = outdir / "valid.doc"
+    assert legacy_doc.exists()
+    assert legacy_doc.read_bytes()[:8] == bytes.fromhex("d0cf11e0a1b11ae1")
+
+    renamed = tmp_path / "report.docx"
+    shutil.copy(legacy_doc, renamed)
+
+    extractor = object.__new__(WordExtractor)
+    # object.__new__ skips __init__, so _session is unset; image extraction is
+    # not what this test exercises (same workaround as test_parse_docx_reads_real_paragraph_table_order).
+    monkeypatch.setattr(extractor, "_extract_images_from_docx", lambda doc: {})
+    content = extractor.parse_docx(str(renamed))
+
+    # LibreOffice flattens the round-tripped table into one paragraph, so only
+    # the text survival is asserted here; the Markdown table shape is covered
+    # by the direct-XML fallback tests.
+    assert "Hello DOCX" in content
+    for cell in ("A", "B", "C", "D"):
+        assert cell in content
+
+
+def test_parse_docx_legacy_doc_without_libreoffice_is_clear(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    legacy = tmp_path / "report.docx"
+    legacy.write_bytes(bytes.fromhex("d0cf11e0a1b11ae1") + b"fake ole payload")
+
+    monkeypatch.setattr(we.shutil, "which", lambda *args, **kwargs: None)
+
+    extractor = object.__new__(WordExtractor)
+    with pytest.raises(ValueError, match="LibreOffice"):
+        extractor.parse_docx(str(legacy))
+
+
+def test_parse_docx_legacy_doc_conversion_failure_is_clear(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    legacy = tmp_path / "report.docx"
+    legacy.write_bytes(bytes.fromhex("d0cf11e0a1b11ae1") + b"fake ole payload")
+
+    def fail_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args=args[0], returncode=1, stdout="", stderr="soffice boom")
+
+    monkeypatch.setattr(we.subprocess, "run", fail_run)
+
+    extractor = object.__new__(WordExtractor)
+    with pytest.raises(ValueError, match="LibreOffice conversion"):
+        extractor.parse_docx(str(legacy))
+
+
+def test_parse_docx_rejects_non_archive_with_clear_error(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.docx"
+    bad.write_bytes(b"this is not a document at all")
+
+    extractor = object.__new__(WordExtractor)
+    with pytest.raises(ValueError, match="not a valid .docx"):
+        extractor.parse_docx(str(bad))
+
+
+def test_parse_docx_rejects_zip_without_document_xml(tmp_path: Path) -> None:
+    empty_zip = tmp_path / "empty.docx"
+    with zipfile.ZipFile(empty_zip, "w") as zf:
+        zf.writestr("[Content_Types].xml", b"<Types/>")
+
+    extractor = object.__new__(WordExtractor)
+    with pytest.raises(ValueError, match="word/document.xml"):
+        extractor.parse_docx(str(empty_zip))

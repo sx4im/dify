@@ -7,12 +7,17 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import uuid
+import zipfile
 from contextlib import closing
 from typing import override
 from urllib.parse import urlparse
+from xml.etree.ElementTree import Element, ParseError
 
+from defusedxml import ElementTree as DefusedElementTree
 from docx import Document as DocxDocument
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
@@ -34,6 +39,157 @@ from models.enums import CreatorUserRole
 from models.model import UploadFile
 
 logger = logging.getLogger(__name__)
+
+_OLE2_MAGIC = bytes.fromhex("d0cf11e0a1b11ae1")
+_DOCX_DOCUMENT_PART = "word/document.xml"
+
+
+def _local_name(tag: str) -> str:
+    """Return the local part of a possibly namespaced XML tag.
+
+    Precondition: tag is the tag of a parsed XML element.
+    Postcondition: returns the part after the last "}" (or the tag unchanged when it
+    carries no namespace), so Strict OOXML, Transitional OOXML and namespace-less
+    tags compare equal.
+    """
+    if not isinstance(tag, str):
+        return ""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _paragraph_text(paragraph: Element) -> str:
+    """Concatenate the text of every descendant text run of a paragraph element.
+
+    Precondition: paragraph is a <w:p>-like element (any namespace).
+    Postcondition: returns the joined text of all descendant <w:t> elements;
+    returns "" when the paragraph holds no text.
+    """
+    return "".join(node.text or "" for node in paragraph.iter() if _local_name(node.tag) == "t")
+
+
+def _table_to_markdown_from_xml(table: Element) -> str:
+    """Render a <w:tbl>-like element as a Markdown table.
+
+    Precondition: table is a <w:tbl>-like element (any namespace).
+    Postcondition: returns the same Markdown shape as WordExtractor._table_to_markdown
+    (first row as header, "---" separator, one row per table row); returns ""
+    when the table has no rows.
+    """
+    rows: list[list[str]] = []
+    for row in table:
+        if _local_name(row.tag) != "tr":
+            continue
+        cells: list[str] = []
+        for cell in row:
+            if _local_name(cell.tag) != "tc":
+                continue
+            paragraph_texts: list[str] = []
+            for paragraph in cell:
+                if _local_name(paragraph.tag) != "p":
+                    continue
+                text = _paragraph_text(paragraph)
+                if text and text not in paragraph_texts:
+                    paragraph_texts.append(text)
+            cells.append(" ".join(paragraph_texts))
+        rows.append(cells)
+    if not rows:
+        return ""
+    total_cols = max(len(row) for row in rows)
+    lines = [
+        "| " + " | ".join(rows[0] + [""] * (total_cols - len(rows[0]))) + " |",
+        "| " + " | ".join(["---"] * total_cols) + " |",
+    ]
+    for row in rows[1:]:
+        lines.append("| " + " | ".join(row + [""] * (total_cols - len(row))) + " |")
+    return "\n".join(lines)
+
+
+def _parse_document_xml(xml_bytes: bytes) -> str:
+    """Extract paragraphs and tables from a word/document.xml part by local name.
+
+    Precondition: xml_bytes is the raw content of the word/document.xml part of a .docx package.
+    Postcondition: returns paragraphs and Markdown tables in document order, joined with "\\n"
+    (blank paragraphs become "\\n", matching WordExtractor.parse_docx); raises ValueError
+    with a clear message when the XML itself cannot be parsed.
+    """
+    try:
+        root = DefusedElementTree.fromstring(xml_bytes)
+    except ParseError as exc:
+        raise ValueError("File is not a valid .docx document: 'word/document.xml' could not be parsed as XML.") from exc
+    body = (
+        root
+        if _local_name(root.tag) == "body"
+        else next((child for child in root if _local_name(child.tag) == "body"), None)
+    )
+    if body is None:
+        return ""
+    parts: list[str] = []
+    for child in body:
+        name = _local_name(child.tag)
+        if name == "p":
+            text = _paragraph_text(child)
+            parts.append(text if text.strip() else "\n")
+        elif name == "tbl":
+            table_markdown = _table_to_markdown_from_xml(child)
+            if table_markdown:
+                parts.append(table_markdown)
+    return "\n".join(parts)
+
+
+def _is_legacy_ole_doc(file_path: str) -> bool:
+    """Detect a legacy OLE2 Compound File Binary (.doc) payload by its magic bytes.
+
+    Precondition: file_path names a readable file.
+    Postcondition: returns True only when the first eight bytes are the OLE2 magic
+    D0 CF 11 E0 A1 B1 1A E1; returns False for unreadable or shorter files.
+    """
+    try:
+        with open(file_path, "rb") as file:
+            return file.read(8) == _OLE2_MAGIC
+    except OSError:
+        return False
+
+
+def _convert_legacy_doc_to_docx(source_path: str, output_dir: str) -> str:
+    """Convert a legacy OLE .doc file to .docx with LibreOffice.
+
+    Precondition: source_path is a legacy .doc file; output_dir exists and is writable.
+    Postcondition: returns the path of the converted .docx file in output_dir.
+    Raises ValueError with a clear message when LibreOffice is missing, the
+    conversion times out, or LibreOffice exits non-zero / produces no file.
+    """
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice is None:
+        raise ValueError(
+            f"Failed to convert legacy .doc file '{source_path}': LibreOffice conversion was attempted "
+            "but no LibreOffice executable ('soffice') was found on this server. "
+            "Install LibreOffice or convert the file to .docx first."
+        )
+    profile_dir = os.path.join(output_dir, "soffice-profile")
+    converted_path = os.path.join(output_dir, os.path.splitext(os.path.basename(source_path))[0] + ".docx")
+    command = [
+        soffice,
+        "--headless",
+        f"-env:UserInstallation=file://{profile_dir}",
+        "--convert-to",
+        "docx",
+        "--outdir",
+        output_dir,
+        source_path,
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(
+            f"Failed to convert legacy .doc file '{source_path}': LibreOffice conversion timed out after 120 seconds."
+        ) from exc
+    if result.returncode != 0 or not os.path.isfile(converted_path):
+        detail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise ValueError(
+            f"Failed to convert legacy .doc file '{source_path}': LibreOffice conversion was attempted "
+            f"but failed (exit code {result.returncode}). {detail}"
+        )
+    return converted_path
 
 
 class WordExtractor(BaseExtractor):
@@ -308,7 +464,58 @@ class WordExtractor(BaseExtractor):
         return "".join(paragraph_content).strip()
 
     def parse_docx(self, docx_path: str) -> str:
-        doc = DocxDocument(docx_path)
+        """Parse a .docx file into plain text with Markdown tables.
+
+        Well-formed packages take the python-docx path unchanged. When python-docx
+        cannot open the package (malformed packages such as Strict OOXML namespaces
+        or a stripped root _rels/.rels), extraction falls back to reading
+        word/document.xml directly; legacy OLE .doc files renamed to .docx are
+        converted with LibreOffice first. Payloads that are neither raise a clear
+        ValueError instead of the underlying python-docx error.
+        """
+        try:
+            doc = DocxDocument(docx_path)
+        except Exception as exc:
+            logger.warning("python-docx failed to open %s (%s); trying fallback extraction", docx_path, exc)
+            return self._parse_docx_with_fallback(docx_path, exc)
+        return self._parse_opened_docx(doc)
+
+    def _parse_docx_with_fallback(self, docx_path: str, original_error: Exception) -> str:
+        """Extract text from a .docx package python-docx could not open.
+
+        Precondition: python-docx raised original_error while opening docx_path.
+        Postcondition: returns the document text for malformed-but-readable packages
+        and for legacy OLE .doc files converted via LibreOffice; raises a clear
+        ValueError when the payload is not a readable .docx package at all.
+        """
+        if not os.path.isfile(docx_path):
+            raise original_error
+        if _is_legacy_ole_doc(docx_path):
+            with tempfile.TemporaryDirectory(prefix="dify-doc-convert-") as tmpdir:
+                converted_path = _convert_legacy_doc_to_docx(docx_path, tmpdir)
+                return self.parse_docx(converted_path)
+        try:
+            with zipfile.ZipFile(docx_path) as docx_zip:
+                try:
+                    document_xml = docx_zip.read(_DOCX_DOCUMENT_PART)
+                except KeyError:
+                    raise ValueError(
+                        f"File '{docx_path}' is not a valid .docx document: "
+                        f"it contains no '{_DOCX_DOCUMENT_PART}' part."
+                    ) from original_error
+        except zipfile.BadZipFile:
+            raise ValueError(
+                f"File '{docx_path}' is not a valid .docx document: "
+                "it is not a ZIP archive (it may be a legacy .doc file or another format)."
+            ) from original_error
+        return _parse_document_xml(document_xml)
+
+    def _parse_opened_docx(self, doc) -> str:
+        """Parse an already-opened python-docx document into text with Markdown tables.
+
+        Precondition: doc is a python-docx Document opened from a well-formed package.
+        Postcondition: returns paragraphs and tables in document order, joined with "\\n".
+        """
 
         content: list[str] = []
 
