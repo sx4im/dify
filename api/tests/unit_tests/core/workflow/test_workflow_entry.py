@@ -35,7 +35,9 @@ from graphon.engine_events import (
     GraphRunAbortedEvent,
     GraphRunFailedEvent,
     GraphRunPausedEvent,
+    GraphRunStartedEvent,
     GraphRunSucceededEvent,
+    NodeRunStartedEvent,
     NodeRunStreamChunkEvent,
     NodeRunSucceededEvent,
 )
@@ -148,6 +150,165 @@ class TestResponseStreamFilterIssue170Cases:
         assert isinstance(final_answer, str)
         assert final_answer.strip() == expected_answer
         assert actual_answer.strip() == final_answer.strip()
+
+
+class _StubEngine:
+    """Minimal engine stand-in for ``iter_dify_graph_engine_events`` tests.
+
+    Only exposes the attributes the event pipeline reads: ``graph``,
+    ``runtime_state``, ``file_runtime``, and ``run()``.
+    """
+
+    def __init__(self, graph: Graph, runtime_state: RuntimeState, events) -> None:
+        self.graph = graph
+        self.runtime_state = runtime_state
+        self.file_runtime = None
+        self._events = events
+
+    def run(self):
+        yield from self._events
+
+
+def _build_46034_graph(runtime_state: RuntimeState) -> Graph:
+    """Start -> Answer graph whose answer references a tool variable."""
+    params = build_test_graph_init_params(
+        workflow_id="wf",
+        graph_config={"nodes": [], "edges": []},
+        user_from=UserFrom.ACCOUNT,
+        invoke_from=InvokeFrom.DEBUGGER,
+    )
+    start_node = StartNode(
+        node_id="start",
+        data=StartNodeData(title="start", variables=[]),
+        init_params=params,
+        runtime_state=runtime_state,
+    )
+    answer_node = AnswerNode(
+        node_id="answer",
+        data=AnswerNodeData(title="answer", answer="{{#tool.answer1#}}"),
+        init_params=params,
+        runtime_state=runtime_state,
+    )
+    return Graph.new().add_root(start_node).add_node(answer_node, from_node_id="start").build()
+
+
+def _tool_variable_events(runtime_state: RuntimeState, *, pool_value: str | None, stream_content: str | None):
+    """Yield the event sequence a tool node produces for one variable.
+
+    Mirrors the real engine order: the empty final marker is emitted before
+    the node's outputs reach the variable pool, and the pool write lands
+    between the marker and the node's ``NodeRunSucceededEvent``.
+    """
+    now = naive_utc_now()
+    yield GraphRunStartedEvent()
+    yield NodeRunStartedEvent(
+        id="exec-tool",
+        node_id="tool",
+        node_type="tool",
+        node_title="tool",
+        start_at=now,
+    )
+    if stream_content is not None:
+        yield NodeRunStreamChunkEvent(
+            id="exec-tool",
+            node_id="tool",
+            node_type="tool",
+            selector=["tool", "answer1"],
+            chunk=stream_content,
+            is_final=False,
+        )
+    yield NodeRunStreamChunkEvent(
+        id="exec-tool",
+        node_id="tool",
+        node_type="tool",
+        selector=["tool", "answer1"],
+        chunk="",
+        is_final=True,
+    )
+    if pool_value is not None:
+        runtime_state.variable_pool.add(("tool", "answer1"), pool_value)
+    yield NodeRunSucceededEvent(
+        id="exec-tool",
+        node_id="tool",
+        node_type="tool",
+        start_at=now,
+    )
+    yield NodeRunStartedEvent(
+        id="exec-answer",
+        node_id="answer",
+        node_type="answer",
+        node_title="answer",
+        start_at=now,
+    )
+    yield NodeRunSucceededEvent(
+        id="exec-answer",
+        node_id="answer",
+        node_type="answer",
+        start_at=now,
+    )
+    yield GraphRunSucceededEvent(outputs={"answer": pool_value or ""})
+
+
+class TestResponseStreamFilterIssue46034Cases:
+    """Reproduces https://github.com/langgenius/dify/issues/46034 at the
+    ``iter_dify_graph_engine_events`` layer.
+
+    A tool node returning a non-streamed variable emits only an empty final
+    marker for it. Without the fix, the response filter treats that marker
+    as a completed variable stream and the answer streams empty for the
+    segment, even though the variable pool holds the value.
+    """
+
+    @staticmethod
+    def test_non_streamed_tool_variable_streams_pool_value() -> None:
+        runtime_state = _build_runtime_state()
+        graph = _build_46034_graph(runtime_state)
+        engine = _StubEngine(
+            graph,
+            runtime_state,
+            _tool_variable_events(runtime_state, pool_value="sess_example", stream_content=None),
+        )
+
+        events = list(iter_dify_graph_engine_events(engine))
+
+        stream_chunk_events = [event for event in events if isinstance(event, NodeRunStreamChunkEvent)]
+        assert stream_chunk_events
+        assert "".join(event.chunk for event in stream_chunk_events) == "sess_example"
+        assert stream_chunk_events[-1].is_final is True
+
+    @staticmethod
+    def test_missing_tool_variable_still_closes_with_empty_content() -> None:
+        """A variable the node never produced must not stall the stream."""
+        runtime_state = _build_runtime_state()
+        graph = _build_46034_graph(runtime_state)
+        engine = _StubEngine(
+            graph,
+            runtime_state,
+            _tool_variable_events(runtime_state, pool_value=None, stream_content=None),
+        )
+
+        events = list(iter_dify_graph_engine_events(engine))
+
+        stream_chunk_events = [event for event in events if isinstance(event, NodeRunStreamChunkEvent)]
+        assert "".join(event.chunk for event in stream_chunk_events) == ""
+        assert stream_chunk_events[-1].is_final is True
+
+    @staticmethod
+    def test_streamed_tool_variable_passes_through_unchanged() -> None:
+        """Variables that streamed content keep their chunk-by-chunk behavior."""
+        runtime_state = _build_runtime_state()
+        graph = _build_46034_graph(runtime_state)
+        engine = _StubEngine(
+            graph,
+            runtime_state,
+            _tool_variable_events(runtime_state, pool_value="sess_example", stream_content="sess_example"),
+        )
+
+        events = list(iter_dify_graph_engine_events(engine))
+
+        stream_chunk_events = [event for event in events if isinstance(event, NodeRunStreamChunkEvent)]
+        assert "".join(event.chunk for event in stream_chunk_events) == "sess_example"
+        assert stream_chunk_events[-1].is_final is True
 
 
 """In-memory regression test: if-else branch + human_input pause + downstream answer nodes.
@@ -1109,6 +1270,11 @@ class TestWorkflowEntryHelpersCases:
                 ),
                 patch.object(
                     workflow_entry,
+                    "_iter_engine_events_skipping_empty_final_markers",
+                    return_value=iter([sentinel.raw_event]),
+                ) as iter_events,
+                patch.object(
+                    workflow_entry,
                     "filter_engine_events",
                     return_value=iter([sentinel.filtered_event]),
                 ) as filter_engine_events,
@@ -1118,8 +1284,9 @@ class TestWorkflowEntryHelpersCases:
             assert events == [sentinel.filtered_event]
             from_engine.assert_called_once_with(graph_engine)
             response_stream_filter_cls.assert_called_once_with()
+            iter_events.assert_called_once_with(graph_engine)
             filter_engine_events.assert_called_once_with(
-                graph_engine.run.return_value,
+                iter_events.return_value,
                 context=sentinel.filter_context,
                 filters=[sentinel.human_input_filter, sentinel.response_stream_filter],
             )

@@ -51,7 +51,19 @@ from graphon.engine.container_handler.builtin.iteration import IterationContaine
 from graphon.engine.container_handler.builtin.loop import LoopContainerHandler
 from graphon.engine.filter import EngineEventFilterContext, ResponseStreamFilter, filter_engine_events
 from graphon.engine.layer import ExecutionLimitsLayer, Layer
-from graphon.engine_events import EngineEvent, GraphRunFailedEvent, NodeEvent, is_node_result_event
+from graphon.engine_events import (
+    EngineEvent,
+    GraphRunAbortedEvent,
+    GraphRunFailedEvent,
+    GraphRunPartialSucceededEvent,
+    GraphRunPausedEvent,
+    GraphRunSucceededEvent,
+    NodeEvent,
+    NodeRunExceptionEvent,
+    NodeRunStreamChunkEvent,
+    NodeRunSucceededEvent,
+    is_node_result_event,
+)
 from graphon.entities.graph_config import NodeConfigDictAdapter
 from graphon.errors import WorkflowNodeRunFailedError
 from graphon.file import File
@@ -74,6 +86,98 @@ logger = logging.getLogger(__name__)
 _file_access_controller = DatabaseFileAccessController()
 
 
+def _decide_held_markers(
+    held_markers: dict[tuple[str, ...], NodeRunStreamChunkEvent],
+    selectors: set[tuple[str, ...]],
+    variable_pool: VariablePool,
+) -> list[NodeRunStreamChunkEvent]:
+    """Release the held markers whose variables never reached the pool.
+
+    A held marker is dropped when the variable pool now holds a value for its
+    selector: the response filter's existing variable-pool fallback will emit
+    that value instead. Otherwise the marker is released unchanged so the
+    filter still closes the selector with empty content, preserving the
+    behavior for variables the node never produced.
+
+    Preconditions: ``selectors`` is a subset of ``held_markers`` keys.
+    Postconditions: every decided selector is removed from ``held_markers``;
+    the returned markers are exactly the held markers for selectors with no
+    pool value, in insertion order.
+    """
+    released: list[NodeRunStreamChunkEvent] = []
+    for selector in held_markers:
+        if selector in selectors:
+            marker = held_markers[selector]
+            if variable_pool.get(selector) is None:
+                released.append(marker)
+    for selector in selectors:
+        held_markers.pop(selector, None)
+    return released
+
+
+def _iter_engine_events_skipping_empty_final_markers(
+    engine: Engine,
+) -> Generator[EngineEvent]:
+    """Suppress empty stream-finalization markers for never-streamed variables.
+
+    Graphon tool nodes emit an empty ``is_final=True`` chunk for every custom
+    variable when they finish, including variables that never streamed any
+    content (``stream=False``). ``ResponseStreamFilter`` treats such a marker
+    as a completed variable stream, so it never falls back to reading the
+    value from the variable pool and the answer streams empty for that segment
+    (langgenius/dify#46034; same underlying failure as #44141).
+
+    A marker for a selector that never streamed a non-empty chunk is held
+    back until its source node finishes. At that point the marker is dropped
+    when the variable pool holds a value for the selector, letting the
+    filter's existing variable-pool fallback emit it; otherwise the marker is
+    released unchanged. Markers are also decided when the run pauses, fails,
+    aborts, or succeeds, so a held marker never survives into a resumed run
+    unaccounted for, and any marker still held when the event stream ends is
+    released.
+
+    Preconditions: ``engine`` exposes ``runtime_state.variable_pool`` and
+    yields graphon engine events in execution order, with each node's
+    ``NodeRunSucceededEvent``/``NodeRunExceptionEvent`` arriving after its
+    outputs are written to the variable pool.
+    Postconditions: every event is yielded exactly once, in order, except
+    held markers dropped under the rule above; markers for selectors that
+    streamed at least one non-empty chunk pass through untouched.
+    """
+    streamed_selectors: set[tuple[str, ...]] = set()
+    held_markers: dict[tuple[str, ...], NodeRunStreamChunkEvent] = {}
+    variable_pool = engine.runtime_state.variable_pool
+    for event in engine.run():
+        if isinstance(event, NodeRunStreamChunkEvent):
+            selector = tuple(event.selector)
+            if event.chunk:
+                streamed_selectors.add(selector)
+                yield event
+            elif event.is_final and selector not in streamed_selectors:
+                held_markers[selector] = event
+            else:
+                yield event
+        elif isinstance(event, (NodeRunSucceededEvent, NodeRunExceptionEvent)):
+            selectors = {selector for selector in held_markers if selector and selector[0] == event.node_id}
+            yield from _decide_held_markers(held_markers, selectors, variable_pool)
+            yield event
+        elif isinstance(
+            event,
+            (
+                GraphRunPausedEvent,
+                GraphRunFailedEvent,
+                GraphRunAbortedEvent,
+                GraphRunSucceededEvent,
+                GraphRunPartialSucceededEvent,
+            ),
+        ):
+            yield from _decide_held_markers(held_markers, set(held_markers), variable_pool)
+            yield event
+        else:
+            yield event
+    yield from _decide_held_markers(held_markers, set(held_markers), variable_pool)
+
+
 def iter_dify_graph_engine_events(
     engine: Engine,
     response_stream_filter: ResponseStreamFilter | None = None,
@@ -85,13 +189,18 @@ def iter_dify_graph_engine_events(
     into the legacy response-ordered stream behavior that Dify exposes to its
     workflow runners and tests.
 
+    Empty stream-finalization markers for variables that never streamed are
+    suppressed before filtering (see
+    ``_iter_engine_events_skipping_empty_final_markers``) so the filter can
+    fall back to the variable pool for their values.
+
     ``response_stream_filter``, when supplied, must be the same instance a
     caller intends to persist on pause (see ``WorkflowRunAgg``) so
     the filter's ``paths_map`` reflects everything the engine has actually
     streamed for this run.
     """
     yield from filter_engine_events(
-        engine.run(),
+        _iter_engine_events_skipping_empty_final_markers(engine),
         context=EngineEventFilterContext.from_engine(engine),
         filters=[
             HumanInputFormEventFilter(form_repository=HumanInputFormSubmissionRepository()),
