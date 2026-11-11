@@ -7,8 +7,11 @@ import logging
 import mimetypes
 import os
 import re
+import subprocess
 import tempfile
 import uuid
+import xml.etree.ElementTree as ET
+import zipfile
 from contextlib import closing
 from typing import override
 from urllib.parse import urlparse
@@ -34,6 +37,18 @@ from models.enums import CreatorUserRole
 from models.model import UploadFile
 
 logger = logging.getLogger(__name__)
+
+# Magic bytes of a legacy OLE2 compound document (e.g. a .doc file).
+_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+# Namespace-agnostic local names used by the direct-XML fallback, so both
+# Transitional and Strict OOXML documents are read the same way.
+_WORD_BODY = "body"
+_WORD_PARAGRAPH = "p"
+_WORD_TABLE = "tbl"
+_WORD_TABLE_ROW = "tr"
+_WORD_TABLE_CELL = "tc"
+_WORD_TEXT = "t"
 
 
 class WordExtractor(BaseExtractor):
@@ -308,7 +323,21 @@ class WordExtractor(BaseExtractor):
         return "".join(paragraph_content).strip()
 
     def parse_docx(self, docx_path: str) -> str:
-        doc = DocxDocument(docx_path)
+        """Extract text from a .docx file, including paragraphs and Markdown tables.
+
+        Preconditions: *docx_path* names a readable file.
+        Postconditions: returns the document text in body order, or raises
+        ValueError with a clear reason when the payload cannot be read as a
+        Word document at all.
+        """
+        try:
+            doc = DocxDocument(docx_path)
+        except Exception:
+            # python-docx cannot open Strict OOXML packages, packages with a
+            # stripped _rels/.rels, or legacy OLE .doc files renamed to .docx.
+            # Fall back to reading word/document.xml directly, or converting a
+            # legacy .doc via LibreOffice, instead of failing the extraction.
+            return self._parse_docx_with_fallback(docx_path)
 
         content: list[str] = []
 
@@ -474,3 +503,142 @@ class WordExtractor(BaseExtractor):
                 case Table():
                     content.append(self._table_to_markdown(block, image_map))
         return "\n".join(content)
+
+    def _parse_docx_with_fallback(self, docx_path: str) -> str:
+        """Recover text when python-docx cannot open the file.
+
+        Preconditions: ``DocxDocument(docx_path)`` already raised.
+        Postconditions: returns the document text for a malformed OOXML
+        package (via direct ``word/document.xml`` parsing) or a legacy OLE
+        .doc renamed to .docx (via LibreOffice conversion); raises ValueError
+        with a clear reason for any other payload.
+        """
+        if self._is_legacy_ole_doc(docx_path):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                converted_path = self._convert_legacy_doc(docx_path, tmp_dir)
+                return self.parse_docx(converted_path)
+        try:
+            return self._parse_document_xml(docx_path)
+        except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+            raise ValueError(
+                f"Cannot extract text from {docx_path}: not a valid Word document "
+                "(not a readable .docx package and not a legacy .doc file)."
+            ) from e
+
+    @staticmethod
+    def _is_legacy_ole_doc(docx_path: str) -> bool:
+        """Return True when the file starts with the OLE2 compound-document magic."""
+        try:
+            with open(docx_path, "rb") as f:
+                return f.read(len(_OLE2_MAGIC)) == _OLE2_MAGIC
+        except OSError:
+            return False
+
+    @staticmethod
+    def _convert_legacy_doc(docx_path: str, output_dir: str) -> str:
+        """Convert a legacy OLE .doc file to .docx with LibreOffice.
+
+        Preconditions: *docx_path* holds OLE2 magic bytes; *output_dir* exists.
+        Postconditions: returns the converted .docx path, or raises ValueError
+        naming the conversion failure (missing soffice, timeout, non-zero exit).
+        """
+        try:
+            result = subprocess.run(
+                ["soffice", "--headless", "--convert-to", "docx", "--outdir", output_dir, docx_path],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except FileNotFoundError as e:
+            raise ValueError(
+                "Cannot extract text from legacy Word (.doc) file "
+                f"{docx_path}: LibreOffice conversion was attempted but soffice is not available."
+            ) from e
+        except subprocess.TimeoutExpired as e:
+            raise ValueError(
+                f"Cannot extract text from legacy Word (.doc) file {docx_path}: LibreOffice conversion timed out."
+            ) from e
+        converted_path = os.path.join(output_dir, os.path.splitext(os.path.basename(docx_path))[0] + ".docx")
+        if result.returncode != 0 or not os.path.isfile(converted_path):
+            detail = (result.stderr or result.stdout or "").strip()
+            raise ValueError(
+                "Cannot extract text from legacy Word (.doc) file "
+                f"{docx_path}: LibreOffice conversion failed (exit code {result.returncode})"
+                + (f": {detail[:500]}" if detail else ".")
+            )
+        return converted_path
+
+    @staticmethod
+    def _parse_document_xml(docx_path: str) -> str:
+        """Extract text by reading word/document.xml straight from the ZIP.
+
+        Preconditions: *docx_path* is a ZIP package containing word/document.xml.
+        Postconditions: returns paragraph text and Markdown tables in body
+        order, matching elements by local name so Strict and Transitional
+        OOXML read identically; images are skipped (they cannot be resolved
+        without the package relationships). Raises BadZipFile, KeyError, or
+        ParseError when the package or its document XML is unreadable.
+        """
+        with zipfile.ZipFile(docx_path) as zf:
+            xml_bytes = zf.read("word/document.xml")
+        root = ET.fromstring(xml_bytes)
+        body = next(
+            (child for child in root if _local_name(child.tag) == _WORD_BODY),
+            None,
+        )
+        if body is None:
+            return ""
+        content: list[str] = []
+        for child in body:
+            local = _local_name(child.tag)
+            if local == _WORD_PARAGRAPH:
+                text = _document_xml_paragraph_text(child)
+                content.append(text if text.strip() else "\n")
+            elif local == _WORD_TABLE:
+                content.append(_document_xml_table_to_markdown(child))
+        return "\n".join(content)
+
+
+def _local_name(tag: object) -> str:
+    """Return the local name of an XML tag, ignoring its namespace."""
+    if not isinstance(tag, str):
+        return ""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _document_xml_paragraph_text(paragraph_elem: ET.Element) -> str:
+    """Concatenate the w:t texts of a paragraph element, in document order."""
+    return "".join(
+        (text_elem.text or "") for text_elem in paragraph_elem.iter() if _local_name(text_elem.tag) == _WORD_TEXT
+    )
+
+
+def _document_xml_cell_text(cell_elem: ET.Element) -> str:
+    """Join a table cell's paragraph texts with spaces."""
+    return " ".join(
+        text
+        for paragraph_elem in cell_elem
+        if _local_name(paragraph_elem.tag) == _WORD_PARAGRAPH
+        for text in [_document_xml_paragraph_text(paragraph_elem)]
+        if text
+    )
+
+
+def _document_xml_table_to_markdown(table_elem: ET.Element) -> str:
+    """Render a w:tbl element as Markdown, mirroring WordExtractor._table_to_markdown."""
+    rows: list[list[str]] = [
+        [_document_xml_cell_text(cell_elem) for cell_elem in row_elem if _local_name(cell_elem.tag) == _WORD_TABLE_CELL]
+        for row_elem in table_elem
+        if _local_name(row_elem.tag) == _WORD_TABLE_ROW
+    ]
+    rows = [row for row in rows if row]
+    if not rows:
+        return ""
+    total_cols = max(len(row) for row in rows)
+    padded = [row + [""] * (total_cols - len(row)) for row in rows]
+    lines = [
+        "| " + " | ".join(padded[0]) + " |",
+        "| " + " | ".join(["---"] * total_cols) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in padded[1:])
+    return "\n".join(lines)

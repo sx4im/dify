@@ -3,7 +3,9 @@
 import io
 import logging
 import os
+import subprocess
 import tempfile
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol, cast
@@ -11,6 +13,7 @@ from typing import Protocol, cast
 import pytest
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
+from docx.opc.exceptions import PackageNotFoundError
 from docx.opc.packuri import PackURI
 from docx.opc.part import Part
 from docx.oxml import OxmlElement
@@ -901,3 +904,143 @@ def test_extract_ignores_non_image_relationship_with_image_in_target(
     assert content == "Visible text"
     assert sqlite_session.scalars(select(UploadFile)).all() == []
     assert not local_image_storage.exists("image_files/")
+
+
+# --- dify #46063: malformed DOCX packages and legacy .doc renamed to .docx ---
+
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+_STRICT_REPLACEMENTS = [
+    (
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "http://purl.oclc.org/ooxml/wordprocessingml/main",
+    ),
+    (
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships",
+    ),
+    (
+        "http://schemas.openxmlformats.org/package/2006/relationships",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships",
+    ),
+]
+
+
+def _make_docx_bytes() -> bytes:
+    doc = Document()
+    doc.add_paragraph("Hello DOCX")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "A"
+    table.cell(0, 1).text = "B"
+    table.cell(1, 0).text = "C"
+    table.cell(1, 1).text = "D"
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _rewrite_docx_zip(
+    data: bytes, replacements: list[tuple[str, str]] | None = None, drop: list[str] | None = None
+) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as zin:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if drop and item.filename in drop:
+                    continue
+                content = zin.read(item.filename)
+                if item.filename.endswith((".xml", ".rels")):
+                    text = content.decode("utf-8")
+                    for old, new in replacements or []:
+                        text = text.replace(old, new)
+                    content = text.encode("utf-8")
+                zout.writestr(item, content)
+    return out.getvalue()
+
+
+def _new_extractor(path: Path) -> WordExtractor:
+    extractor = object.__new__(WordExtractor)
+    extractor._session = None
+    extractor.file_path = str(path)
+    return extractor
+
+
+def test_parse_docx_strict_ooxml_falls_back_to_direct_xml(tmp_path: Path) -> None:
+    wellformed = tmp_path / "wellformed.docx"
+    wellformed.write_bytes(_make_docx_bytes())
+    strict = tmp_path / "strict.docx"
+    strict.write_bytes(_rewrite_docx_zip(_make_docx_bytes(), _STRICT_REPLACEMENTS))
+
+    # python-docx cannot open Strict OOXML packages at all.
+    with pytest.raises(AttributeError, match="Relationship_lst"):
+        Document(str(strict))
+
+    extractor = _new_extractor(strict)
+    assert extractor.parse_docx(str(strict)) == _new_extractor(wellformed).parse_docx(str(wellformed))
+
+
+def test_parse_docx_stripped_rels_falls_back_to_direct_xml(tmp_path: Path) -> None:
+    wellformed = tmp_path / "wellformed.docx"
+    wellformed.write_bytes(_make_docx_bytes())
+    stripped = tmp_path / "stripped.docx"
+    stripped.write_bytes(_rewrite_docx_zip(_make_docx_bytes(), drop=["_rels/.rels"]))
+
+    with pytest.raises(KeyError, match="officeDocument"):
+        Document(str(stripped))
+
+    extractor = _new_extractor(stripped)
+    assert extractor.parse_docx(str(stripped)) == _new_extractor(wellformed).parse_docx(str(wellformed))
+
+
+def test_parse_docx_legacy_doc_renamed_to_docx_converts_via_libreoffice(tmp_path: Path) -> None:
+    source = tmp_path / "source.docx"
+    source.write_bytes(_make_docx_bytes())
+    subprocess.run(
+        ["soffice", "--headless", "--convert-to", "doc", "--outdir", str(tmp_path), str(source)],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    legacy = tmp_path / "source.doc"
+    assert legacy.read_bytes()[:8] == _OLE_MAGIC
+
+    renamed = tmp_path / "report.docx"
+    renamed.write_bytes(legacy.read_bytes())
+
+    with pytest.raises(PackageNotFoundError):
+        Document(str(renamed))
+
+    content = _new_extractor(renamed).parse_docx(str(renamed))
+    # LibreOffice's .doc round-trip flattens the table into one paragraph, so
+    # the requirement here is the full text, not the Markdown table shape.
+    assert "Hello DOCX" in content
+    assert all(cell in content for cell in ("A", "B", "C", "D"))
+
+
+def test_parse_docx_non_archive_raises_clear_error(tmp_path: Path) -> None:
+    path = tmp_path / "not-a-doc.docx"
+    path.write_bytes(b"this is plain text, not a zip archive")
+
+    with pytest.raises(ValueError, match="not a valid"):
+        _new_extractor(path).parse_docx(str(path))
+
+
+def test_parse_docx_legacy_doc_conversion_failure_is_clear(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source = tmp_path / "source.docx"
+    source.write_bytes(_make_docx_bytes())
+    subprocess.run(
+        ["soffice", "--headless", "--convert-to", "doc", "--outdir", str(tmp_path), str(source)],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    renamed = tmp_path / "report.docx"
+    renamed.write_bytes((tmp_path / "source.doc").read_bytes())
+
+    def missing_soffice(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("soffice not found")
+
+    monkeypatch.setattr(we.subprocess, "run", missing_soffice)
+
+    with pytest.raises(ValueError, match="LibreOffice"):
+        _new_extractor(renamed).parse_docx(str(renamed))
