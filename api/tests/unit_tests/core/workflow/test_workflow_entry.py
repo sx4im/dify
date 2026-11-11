@@ -1109,6 +1109,11 @@ class TestWorkflowEntryHelpersCases:
                 ),
                 patch.object(
                     workflow_entry,
+                    "NonStreamedVariableFilter",
+                    return_value=sentinel.non_streamed_variable_filter,
+                ),
+                patch.object(
+                    workflow_entry,
                     "filter_engine_events",
                     return_value=iter([sentinel.filtered_event]),
                 ) as filter_engine_events,
@@ -1121,7 +1126,11 @@ class TestWorkflowEntryHelpersCases:
             filter_engine_events.assert_called_once_with(
                 graph_engine.run.return_value,
                 context=sentinel.filter_context,
-                filters=[sentinel.human_input_filter, sentinel.response_stream_filter],
+                filters=[
+                    sentinel.human_input_filter,
+                    sentinel.non_streamed_variable_filter,
+                    sentinel.response_stream_filter,
+                ],
             )
 
         def test_run_delegates_to_dify_event_iterator(self):

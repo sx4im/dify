@@ -29,6 +29,7 @@ from core.workflow.node_factory import (
 )
 from core.workflow.nodes.agent_v2.binding_resolver import WorkflowAgentBindingResolver
 from core.workflow.nodes.human_input.boundary import HumanInputFormEventFilter
+from core.workflow.non_streamed_variable_filter import NonStreamedVariableFilter
 from core.workflow.system_variables import (
     default_system_variables,
     get_node_creation_preload_selectors,
@@ -79,11 +80,13 @@ def iter_dify_graph_engine_events(
     response_stream_filter: ResponseStreamFilter | None = None,
 ) -> Generator[EngineEvent]:
     """
-    Apply Dify's response streaming compatibility filter to Engine events.
+    Apply Dify's response streaming compatibility filters to Engine events.
 
     Graphon emits raw variable stream chunks and requires callers to opt
     into the legacy response-ordered stream behavior that Dify exposes to its
-    workflow runners and tests.
+    workflow runners and tests. An empty-final-marker filter runs first so
+    never-streamed variables still reach the Answer node from the variable
+    pool (https://github.com/langgenius/dify/issues/46034).
 
     ``response_stream_filter``, when supplied, must be the same instance a
     caller intends to persist on pause (see ``WorkflowRunAgg``) so
@@ -95,6 +98,11 @@ def iter_dify_graph_engine_events(
         context=EngineEventFilterContext.from_engine(engine),
         filters=[
             HumanInputFormEventFilter(form_repository=HumanInputFormSubmissionRepository()),
+            # Must run before the response stream filter: an empty final
+            # marker for a never-streamed variable would otherwise be
+            # buffered as a stream event and block the pool fallback
+            # (https://github.com/langgenius/dify/issues/46034).
+            NonStreamedVariableFilter(),
             response_stream_filter or ResponseStreamFilter(),
         ],
     )
