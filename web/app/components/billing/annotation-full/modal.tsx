@@ -30,7 +30,7 @@ const AnnotationFullModal: FC<Props> = ({ show, onHide }) => {
             <IconButton
               aria-label={t(($) => $['operation.close'], { ns: 'common' })}
               size="lg"
-              className="absolute inset-e-6 top-6"
+              className="absolute inset-e-6 top-6 z-10"
             >
               <span aria-hidden className="i-ri-close-line size-4" />
             </IconButton>
