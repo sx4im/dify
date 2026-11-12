@@ -92,12 +92,35 @@ SerializedWorkflowVariables = dict[str, SerializedWorkflowValue]
 
 
 def _resolve_workflow_app_tenant_id(session: Session, app_id: str) -> str:
+    """Resolve the tenant owning the workflow draft variables for ``app_id``.
+
+    Precondition: ``app_id`` identifies either an app or a RAG pipeline.
+    Postcondition: returns the tenant id owning that app or pipeline.
+    Failure behavior: raises ``ValueError`` when no app row and no RAG
+    pipeline draft workflow row exists for ``app_id``; no rows are created
+    or modified, so the caller's invariants are unchanged on failure.
+    """
     from .model import App
 
     tenant_id = session.scalar(select(App.tenant_id).where(App.id == app_id))
-    if not tenant_id:
-        raise ValueError(f"Unable to resolve tenant_id for app {app_id}")
-    return tenant_id
+    if tenant_id:
+        return tenant_id
+
+    # RAG Knowledge Pipelines have no App row: their workflows are keyed by
+    # app_id == pipeline id with type "rag-pipeline". Resolve the tenant from
+    # the pipeline's draft workflow so draft file variables can load.
+    # The fallback is restricted to rag-pipeline draft workflows, so apps
+    # whose App row is missing still fail exactly as before.
+    tenant_id = session.scalar(
+        select(Workflow.tenant_id).where(
+            Workflow.app_id == app_id,
+            Workflow.type == WorkflowType.RAG_PIPELINE,
+            Workflow.version == Workflow.VERSION_DRAFT,
+        )
+    )
+    if tenant_id:
+        return tenant_id
+    raise ValueError(f"Unable to resolve tenant_id for app {app_id}")
 
 
 class WorkflowContentDict(TypedDict):

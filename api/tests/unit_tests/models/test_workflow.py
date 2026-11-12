@@ -58,6 +58,7 @@ from models.workflow import (
     is_system_variable_editable,
 )
 from models.workflow import WorkflowType as ModelWorkflowType
+from tests.helpers.unit.model_factories import make_workflow
 
 
 class TestConversationVariableCases:
@@ -2238,3 +2239,52 @@ def test_resolve_workflow_app_tenant_id_reads_through_caller_session(sqlite_sess
 
     with pytest.raises(ValueError, match="Unable to resolve tenant_id"):
         _resolve_workflow_app_tenant_id(sqlite_session, "missing-app")
+
+
+def test_resolve_workflow_app_tenant_id_falls_back_to_rag_pipeline_draft_workflow(
+    sqlite_session: Session,
+) -> None:
+    # RAG pipelines have no App row; their draft workflow carries the tenant.
+    workflow = make_workflow(
+        tenant_id="tenant-rag",
+        app_id="pipeline-1",
+        workflow_type=WorkflowType.RAG_PIPELINE,
+    )
+    sqlite_session.add(workflow)
+    sqlite_session.flush()
+
+    assert _resolve_workflow_app_tenant_id(sqlite_session, "pipeline-1") == "tenant-rag"
+
+
+def test_resolve_workflow_app_tenant_id_prefers_app_row_over_rag_workflow(sqlite_session: Session) -> None:
+    app = App(
+        id="shared-1",
+        tenant_id="tenant-app",
+        name="Workflow",
+        mode=AppMode.WORKFLOW,
+        enable_site=True,
+        enable_api=True,
+    )
+    sqlite_session.add(app)
+    workflow = make_workflow(
+        tenant_id="tenant-rag",
+        app_id="shared-1",
+        workflow_type=WorkflowType.RAG_PIPELINE,
+    )
+    sqlite_session.add(workflow)
+    sqlite_session.flush()
+
+    assert _resolve_workflow_app_tenant_id(sqlite_session, "shared-1") == "tenant-app"
+
+
+def test_resolve_workflow_app_tenant_id_ignores_non_rag_workflow(sqlite_session: Session) -> None:
+    workflow = make_workflow(
+        tenant_id="tenant-plain",
+        app_id="plain-1",
+        workflow_type=WorkflowType.WORKFLOW,
+    )
+    sqlite_session.add(workflow)
+    sqlite_session.flush()
+
+    with pytest.raises(ValueError, match="Unable to resolve tenant_id"):
+        _resolve_workflow_app_tenant_id(sqlite_session, "plain-1")
