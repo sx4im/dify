@@ -92,9 +92,27 @@ SerializedWorkflowVariables = dict[str, SerializedWorkflowValue]
 
 
 def _resolve_workflow_app_tenant_id(session: Session, app_id: str) -> str:
+    """Resolve the tenant owning the workflow draft variables for ``app_id``.
+
+    Precondition: ``app_id`` is the polymorphic owner id from a draft-variable
+    row — an app id, a RAG pipeline id, or a snippet id.
+    Postcondition: returns the owning tenant id. Raises ``ValueError`` when no
+    app row and no workflow row carry that owner id. Tenant isolation holds:
+    the returned tenant is the owner of the matched app or workflow row.
+    """
     from .model import App
 
     tenant_id = session.scalar(select(App.tenant_id).where(App.id == app_id))
+    if tenant_id:
+        return tenant_id
+
+    # RAG pipelines (and snippets) have no row in `apps`: their workflow's
+    # polymorphic `app_id` holds the pipeline/snippet id instead. Resolve the
+    # tenant from the owning workflow row so draft file variables can load.
+    # Every version of one owner shares the same tenant, so any matching row
+    # gives the right tenant; tenant isolation is preserved because the
+    # returned tenant is the owner of that workflow row.
+    tenant_id = session.scalar(select(Workflow.tenant_id).where(Workflow.app_id == app_id))
     if not tenant_id:
         raise ValueError(f"Unable to resolve tenant_id for app {app_id}")
     return tenant_id

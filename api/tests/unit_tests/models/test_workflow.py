@@ -2238,3 +2238,52 @@ def test_resolve_workflow_app_tenant_id_reads_through_caller_session(sqlite_sess
 
     with pytest.raises(ValueError, match="Unable to resolve tenant_id"):
         _resolve_workflow_app_tenant_id(sqlite_session, "missing-app")
+
+
+def test_resolve_workflow_app_tenant_id_falls_back_to_rag_pipeline_workflow(sqlite_session: Session) -> None:
+    # RAG pipelines have no row in `apps`; their workflow row carries the
+    # pipeline id as its polymorphic app_id.
+    workflow = _workflow_Workflow(
+        tenant_id="tenant-rag",
+        app_id="pipeline-1",
+        type=WorkflowType.RAG_PIPELINE,
+        version="draft",
+        graph="{}",
+        _features="{}",
+        created_by="user-1",
+        _environment_variables=[],
+        _conversation_variables=[],
+        _rag_pipeline_variables=[],
+    )
+    sqlite_session.add(workflow)
+    sqlite_session.flush()
+
+    assert _resolve_workflow_app_tenant_id(sqlite_session, "pipeline-1") == "tenant-rag"
+
+
+def test_resolve_workflow_app_tenant_id_prefers_app_row_over_workflow_row(sqlite_session: Session) -> None:
+    app = App(
+        id="app-2",
+        tenant_id="tenant-1",
+        name="Workflow",
+        mode=AppMode.WORKFLOW,
+        enable_site=True,
+        enable_api=True,
+    )
+    sqlite_session.add(app)
+    workflow = _workflow_Workflow(
+        tenant_id="tenant-other",
+        app_id="app-2",
+        type=WorkflowType.WORKFLOW,
+        version="draft",
+        graph="{}",
+        _features="{}",
+        created_by="user-1",
+        _environment_variables=[],
+        _conversation_variables=[],
+        _rag_pipeline_variables=[],
+    )
+    sqlite_session.add(workflow)
+    sqlite_session.flush()
+
+    assert _resolve_workflow_app_tenant_id(sqlite_session, "app-2") == "tenant-1"
