@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from models.enums import EndUserType
@@ -144,3 +145,88 @@ def test_get_or_create_batch_reuses_existing_users_and_creates_missing_ones(
     assert result[second_app_id].app_id == second_app_id
     assert result[second_app_id].external_user_id == "session-1"
     assert result[second_app_id]._is_anonymous is False
+
+
+def _new_end_user_command(*, app_id: str = _APP_ID, session_id: str = "session-1") -> NewAppScopedEndUser:
+    return NewAppScopedEndUser(
+        tenant_id=_TENANT_ID,
+        app_id=app_id,
+        type=EndUserType.SERVICE_API.value,
+        is_anonymous=False,
+        session_id=session_id,
+        external_user_id=session_id,
+    )
+
+
+def _count_end_users(session: Session) -> int:
+    return session.scalar(select(func.count()).select_from(EndUser)) or 0
+
+
+def test_create_returns_the_same_row_when_called_twice_for_one_identity(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    """Two creates for one identity must not create a duplicate row.
+
+    This is the single-threaded form of the concurrent-first-request race:
+    the second create observes the row the first one inserted and returns
+    it instead of inserting again.
+    """
+    repository = AppScopedEndUserRepo(session_factory=sqlite_session_factory)
+
+    first = repository.create(_new_end_user_command())
+    second = repository.create(_new_end_user_command())
+
+    assert second.id == first.id
+    assert second.value.id == first.id
+    assert _count_end_users(sqlite_session) == 1
+
+
+def test_create_batch_returns_the_same_rows_when_called_twice(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    repository = AppScopedEndUserRepo(session_factory=sqlite_session_factory)
+    second_app_id = "66666666-6666-6666-6666-666666666666"
+    commands = [_new_end_user_command(), _new_end_user_command(app_id=second_app_id)]
+
+    first = repository.create_batch(commands)
+    second = repository.create_batch(commands)
+
+    assert [stored.id for stored in second] == [stored.id for stored in first]
+    assert _count_end_users(sqlite_session) == 2
+
+
+def test_get_or_create_returns_the_same_row_when_called_twice_for_one_identity(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    """The service-level race outcome: the second call reuses the first row."""
+    repository = AppScopedEndUserRepo(session_factory=sqlite_session_factory)
+    service = AppScopedEndUserService(end_users=repository)
+
+    first = service.get_or_create_end_user(tenant_id=_TENANT_ID, app_id=_APP_ID, user_id="session-1")
+    second = service.get_or_create_end_user(tenant_id=_TENANT_ID, app_id=_APP_ID, user_id="session-1")
+
+    assert second.id == first.id
+    assert _count_end_users(sqlite_session) == 1
+
+
+def test_find_by_apps_returns_rows_in_creation_order(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    """Lookups resolve deterministically, oldest row first."""
+    _persist_end_user(sqlite_session)  # session-1, created 2026-01-01
+    repository = AppScopedEndUserRepo(session_factory=sqlite_session_factory)
+    second_app_id = "66666666-6666-6666-6666-666666666666"
+    newer = repository.create(_new_end_user_command(app_id=second_app_id))
+
+    found = repository.find_by_apps(
+        tenant_id=_TENANT_ID,
+        app_ids=[second_app_id, _APP_ID],
+        user_id="session-1",
+        type=EndUserType.SERVICE_API.value,
+    )
+
+    assert [stored.id for stored in found] == [_END_USER_ID, newer.id]

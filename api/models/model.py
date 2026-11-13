@@ -2042,6 +2042,12 @@ class EndUser(UserMixin, TypeBase):
         sa.PrimaryKeyConstraint("id", name="end_user_pkey"),
         sa.Index("end_user_session_id_idx", "session_id", "type"),
         sa.Index("end_user_tenant_session_id_idx", "tenant_id", "session_id", "type"),
+        # One row per (tenant, app, session, type). The lookup-then-insert in
+        # AppScopedEndUserService is not atomic, so without this constraint
+        # concurrent first requests for the same user each insert their own row.
+        sa.UniqueConstraint(
+            "tenant_id", "app_id", "session_id", "type", name="end_user_tenant_app_session_type_unique"
+        ),
     )
 
     tenant_id: Mapped[str] = mapped_column(StringUUID, nullable=False, default=None)
