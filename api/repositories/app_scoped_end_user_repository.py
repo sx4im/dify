@@ -2,8 +2,12 @@
 
 from collections.abc import Sequence
 from typing import override
+from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from models.enums import EndUserType
@@ -85,11 +89,16 @@ class AppScopedEndUserRepo(AppScopedEndUserQuery, AppScopedEndUserRepository[End
     ) -> Sequence[StoredAppScopedEndUser[EndUser]]:
         with self._session_factory() as session:
             end_users = session.scalars(
-                select(EndUser).where(
+                select(EndUser)
+                .where(
                     EndUser.tenant_id == tenant_id,
                     EndUser.app_id == app_id,
                     EndUser.session_id == user_id,
                 )
+                # Oldest first, so concurrent readers converge on the same row
+                # while duplicates created before the unique constraint existed
+                # are still being cleaned up.
+                .order_by(EndUser.created_at, EndUser.id)
             ).all()
         return [self._stored(end_user) for end_user in end_users]
 
@@ -104,51 +113,137 @@ class AppScopedEndUserRepo(AppScopedEndUserQuery, AppScopedEndUserRepository[End
     ) -> Sequence[StoredAppScopedEndUser[EndUser]]:
         with self._session_factory() as session:
             end_users = session.scalars(
-                select(EndUser).where(
+                select(EndUser)
+                .where(
                     EndUser.tenant_id == tenant_id,
                     EndUser.app_id.in_(app_ids),
                     EndUser.session_id == user_id,
                     EndUser.type == EndUserType(type),
                 )
+                .order_by(EndUser.created_at, EndUser.id)
             ).all()
         return [self._stored(end_user) for end_user in end_users]
 
     @override
     def create(self, command: NewAppScopedEndUser) -> StoredAppScopedEndUser[EndUser]:
-        end_user = EndUser(
-            tenant_id=command.tenant_id,
-            app_id=command.app_id,
-            type=EndUserType(command.type),
-            _is_anonymous=command.is_anonymous,
-            session_id=command.session_id,
-            external_user_id=command.external_user_id,
-        )
+        # Insert-or-fetch: two concurrent first requests for the same user both
+        # reach this point after finding nothing. The unique constraint on
+        # (tenant_id, app_id, session_id, type) makes one insert win; the
+        # loser re-reads the winner instead of raising.
+        values = self._values(command)
         with self._session_factory.begin() as session:
-            session.add(end_user)
-            session.flush()
-        return self._stored(end_user)
+            self._insert_end_users(session, [values])
+            stored = self._fetch_by_identity(
+                session,
+                tenant_id=command.tenant_id,
+                app_id=command.app_id,
+                session_id=command.session_id,
+                type=command.type,
+            )
+        if stored is None:
+            raise RuntimeError("App-scoped end user creation did not produce a row")
+        return stored
 
     @override
     def create_batch(
         self,
         commands: Sequence[NewAppScopedEndUser],
     ) -> Sequence[StoredAppScopedEndUser[EndUser]]:
-        end_users = [
-            EndUser(
-                tenant_id=command.tenant_id,
-                app_id=command.app_id,
-                type=EndUserType(command.type),
-                _is_anonymous=command.is_anonymous,
-                session_id=command.session_id,
-                external_user_id=command.external_user_id,
-            )
-            for command in commands
-        ]
+        if not commands:
+            return []
+        values_list = [self._values(command) for command in commands]
         with self._session_factory.begin() as session:
-            session.add_all(end_users)
-            if end_users:
-                session.flush()
-        return [self._stored(end_user) for end_user in end_users]
+            self._insert_end_users(session, values_list)
+            stored = [
+                self._fetch_by_identity(
+                    session,
+                    tenant_id=command.tenant_id,
+                    app_id=command.app_id,
+                    session_id=command.session_id,
+                    type=command.type,
+                )
+                for command in commands
+            ]
+        missing = [command for command, row in zip(commands, stored, strict=True) if row is None]
+        if missing:
+            raise RuntimeError("App-scoped end user batch creation did not produce rows")
+        return [row for row in stored if row is not None]
+
+    @staticmethod
+    def _values(command: NewAppScopedEndUser) -> dict[str, object]:
+        return {
+            "id": str(uuid4()),
+            "tenant_id": command.tenant_id,
+            "app_id": command.app_id,
+            "type": EndUserType(command.type),
+            "_is_anonymous": command.is_anonymous,
+            "session_id": command.session_id,
+            "external_user_id": command.external_user_id,
+        }
+
+    @staticmethod
+    def _insert_end_users(session: Session, values_list: Sequence[dict[str, object]]) -> None:
+        """Insert rows, silently skipping ones another request just created.
+
+        Same dialect split as the human-input contact repository: Postgres
+        targets the unique constraint by name, MySQL re-assigns an identity
+        column to its own inserted value (a no-op update), SQLite targets the
+        identity columns. Unknown dialects fall back to a plain ORM insert.
+        """
+        dialect_name = session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            statement = postgresql_insert(EndUser).values(values_list)
+            session.execute(
+                statement.on_conflict_do_nothing(
+                    constraint="end_user_tenant_app_session_type_uq",
+                )
+            )
+        elif dialect_name == "mysql":
+            statement = mysql_insert(EndUser).values(values_list)
+            session.execute(statement.on_duplicate_key_update(session_id=statement.inserted.session_id))
+        elif dialect_name == "sqlite":
+            statement = sqlite_insert(EndUser).values(values_list)
+            session.execute(
+                statement.on_conflict_do_nothing(index_elements=["tenant_id", "app_id", "session_id", "type"])
+            )
+        else:
+            session.add_all(
+                EndUser(
+                    id=str(values["id"]),
+                    tenant_id=str(values["tenant_id"]),
+                    app_id=str(values["app_id"]) if values["app_id"] is not None else None,
+                    type=EndUserType(str(values["type"])),
+                    _is_anonymous=bool(values["_is_anonymous"]),
+                    session_id=str(values["session_id"]),
+                    external_user_id=(
+                        str(values["external_user_id"]) if values["external_user_id"] is not None else None
+                    ),
+                )
+                for values in values_list
+            )
+            session.flush()
+
+    def _fetch_by_identity(
+        self,
+        session: Session,
+        *,
+        tenant_id: str,
+        app_id: str,
+        session_id: str,
+        type: str,
+    ) -> StoredAppScopedEndUser[EndUser] | None:
+        end_user = session.scalar(
+            select(EndUser)
+            .where(
+                EndUser.tenant_id == tenant_id,
+                EndUser.app_id == app_id,
+                EndUser.session_id == session_id,
+                EndUser.type == EndUserType(type),
+            )
+            .order_by(EndUser.created_at, EndUser.id)
+            .limit(1)
+        )
+        return self._stored(end_user) if end_user is not None else None
 
     @override
     def update_type(self, end_user_id: str, type: str) -> StoredAppScopedEndUser[EndUser]:

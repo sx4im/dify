@@ -1,5 +1,7 @@
 from datetime import datetime
+from threading import Barrier, Thread
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from models.enums import EndUserType
@@ -144,3 +146,82 @@ def test_get_or_create_batch_reuses_existing_users_and_creates_missing_ones(
     assert result[second_app_id].app_id == second_app_id
     assert result[second_app_id].external_user_id == "session-1"
     assert result[second_app_id]._is_anonymous is False
+
+
+def _new_command(*, app_id: str = _APP_ID, session_id: str = "session-1") -> NewAppScopedEndUser:
+    return NewAppScopedEndUser(
+        tenant_id=_TENANT_ID,
+        app_id=app_id,
+        type=EndUserType.SERVICE_API.value,
+        is_anonymous=False,
+        session_id=session_id,
+        external_user_id=session_id,
+    )
+
+
+def _end_user_row_count(session: Session) -> int:
+    return session.scalar(select(func.count()).select_from(EndUser)) or 0
+
+
+def test_create_returns_existing_row_for_duplicate_identity(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    repository = AppScopedEndUserRepo(session_factory=sqlite_session_factory)
+
+    first = repository.create(_new_command())
+    second = repository.create(_new_command())
+
+    assert first.id == second.id
+    assert _end_user_row_count(sqlite_session) == 1
+
+
+def test_create_batch_returns_existing_rows_for_duplicate_identities(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    repository = AppScopedEndUserRepo(session_factory=sqlite_session_factory)
+    second_app_id = "66666666-6666-6666-6666-666666666666"
+    commands = [_new_command(), _new_command(app_id=second_app_id)]
+
+    first = repository.create_batch(commands)
+    second = repository.create_batch(commands)
+
+    assert [row.id for row in first] == [row.id for row in second]
+    assert _end_user_row_count(sqlite_session) == 2
+
+
+def test_concurrent_first_requests_create_one_end_user_row(
+    sqlite_session: Session,
+    sqlite_session_factory: sessionmaker[Session],
+) -> None:
+    repository = AppScopedEndUserRepo(session_factory=sqlite_session_factory)
+    service = AppScopedEndUserService(end_users=repository)
+    results: list[str] = []
+    errors: list[BaseException] = []
+    # Release every thread at once so all ten lookups see "no row" before
+    # any of the ten inserts lands — the exact race from the issue.
+    start = Barrier(10)
+
+    def _run() -> None:
+        try:
+            start.wait()
+            end_user = service.get_or_create_end_user(
+                tenant_id=_TENANT_ID,
+                app_id=_APP_ID,
+                user_id="new-user-1",
+            )
+            results.append(end_user.id)
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [Thread(target=_run) for _ in range(10)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(results) == 10
+    assert len(set(results)) == 1
+    assert _end_user_row_count(sqlite_session) == 1
