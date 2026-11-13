@@ -91,7 +91,10 @@ class ConsoleHumanInputFormApi(Resource):
 
     @staticmethod
     def _ensure_console_recipient_type(form: Form) -> None:
-        if not is_recipient_type_allowed_for_surface(form.recipient_type, HumanInputSurface.CONSOLE):
+        # Backstage links submit through this endpoint too, so both console-side
+        # recipient types are submittable here; ordinary interaction surfaces
+        # only the CONSOLE token, which the policy module enforces separately.
+        if not is_recipient_type_allowed_for_surface(form.recipient_type, HumanInputSurface.CONSOLE_BACKSTAGE):
             raise NotFoundError("form not found")
 
     @error_responses(FormSubmittedError)

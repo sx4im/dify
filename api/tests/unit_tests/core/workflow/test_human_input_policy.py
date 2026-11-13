@@ -14,8 +14,9 @@ from models.human_input import RecipientType
 
 
 # Token surfaces (SERVICE_API, OPENAPI) may act only on public web-app forms;
-# CONSOLE may act on internal console/backstage forms. OPENAPI mirrors SERVICE_API
-# today but is pinned independently because the two are expected to diverge.
+# ordinary CONSOLE acts only on the CONSOLE recipient, while the management
+# entry CONSOLE_BACKSTAGE may also act on BACKSTAGE recipients. OPENAPI mirrors
+# SERVICE_API today but is pinned independently because the two are expected to diverge.
 @pytest.mark.parametrize(
     ("recipient_type", "surface", "allowed"),
     [
@@ -27,8 +28,11 @@ from models.human_input import RecipientType
         (RecipientType.CONSOLE, HumanInputSurface.OPENAPI, False),
         (RecipientType.BACKSTAGE, HumanInputSurface.OPENAPI, False),
         (RecipientType.CONSOLE, HumanInputSurface.CONSOLE, True),
-        (RecipientType.BACKSTAGE, HumanInputSurface.CONSOLE, True),
+        (RecipientType.BACKSTAGE, HumanInputSurface.CONSOLE, False),
         (RecipientType.STANDALONE_WEB_APP, HumanInputSurface.CONSOLE, False),
+        (RecipientType.CONSOLE, HumanInputSurface.CONSOLE_BACKSTAGE, True),
+        (RecipientType.BACKSTAGE, HumanInputSurface.CONSOLE_BACKSTAGE, True),
+        (RecipientType.STANDALONE_WEB_APP, HumanInputSurface.CONSOLE_BACKSTAGE, False),
     ],
 )
 def test_recipient_type_allowed_per_surface(

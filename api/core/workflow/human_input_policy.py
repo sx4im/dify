@@ -21,15 +21,24 @@ class HumanInputSurface(StrEnum):
 
     SERVICE_API = "service_api"
     CONSOLE = "console"
+    # Management entry for run-log / pause-details links: the only entry that may
+    # act on a BACKSTAGE recipient. Ordinary Console interaction must never
+    # surface a BACKSTAGE token, so it uses CONSOLE, not this.
+    CONSOLE_BACKSTAGE = "console_backstage"
     OPENAPI = "openapi"
     WEB_APP = "web_app"
 
 
 # Web App, Service API and OpenAPI responses expose only web-app recipients.
+# Ordinary Console interaction exposes only the CONSOLE recipient: a BACKSTAGE
+# recipient is never a substitute for it, so a backstage-only form yields no
+# token there (its approval channel still names console). The management entry
+# keeps the old shared behaviour so administrative links stay available.
 # The public form endpoint also accepts email links; its admission rules are separate.
 ALLOWED_RECIPIENT_TYPES_BY_SURFACE: dict[HumanInputSurface, frozenset[RecipientType]] = {
     HumanInputSurface.SERVICE_API: frozenset({RecipientType.STANDALONE_WEB_APP}),
-    HumanInputSurface.CONSOLE: frozenset({RecipientType.CONSOLE, RecipientType.BACKSTAGE}),
+    HumanInputSurface.CONSOLE: frozenset({RecipientType.CONSOLE}),
+    HumanInputSurface.CONSOLE_BACKSTAGE: frozenset({RecipientType.CONSOLE, RecipientType.BACKSTAGE}),
     HumanInputSurface.OPENAPI: frozenset({RecipientType.STANDALONE_WEB_APP}),
     HumanInputSurface.WEB_APP: frozenset({RecipientType.STANDALONE_WEB_APP}),
 }
