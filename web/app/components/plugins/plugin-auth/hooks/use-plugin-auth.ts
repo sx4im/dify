@@ -1,5 +1,6 @@
 import type { PluginPayload } from '../types'
 import { CredentialTypeEnum } from '../types'
+import { useEffect, useRef } from 'react'
 import {
   useGetPluginCredentialInfoHook,
   useInvalidPluginCredentialInfoHook,
@@ -10,14 +11,26 @@ export const usePluginAuth = (
   enable?: boolean,
   includeCredentialIds?: string[],
 ) => {
-  const { data, isLoading } = useGetPluginCredentialInfoHook(
+  const { data, isLoading, isError } = useGetPluginCredentialInfoHook(
     pluginPayload,
     enable,
     includeCredentialIds,
   )
-  const isAuthorized = !!data?.credentials.length
-  const canOAuth = data?.supported_credential_types.includes(CredentialTypeEnum.OAUTH2)
-  const canApiKey = data?.supported_credential_types.includes(CredentialTypeEnum.API_KEY)
+  // Keep the last loaded credential info while a refetch is in flight (e.g.
+  // selecting a credential changes the query key). Without this, `data`
+  // briefly becomes undefined, `isAuthorized` flips to false, and callers
+  // that switch on it unmount their trigger — dropping keyboard focus to
+  // `document.body`. A failed refetch still clears the retained data, so an
+  // error surfaces as unauthorized, as before.
+  const previousDataRef = useRef(data)
+  useEffect(() => {
+    if (data)
+      previousDataRef.current = data
+  }, [data])
+  const effectiveData = data ?? (!isError ? previousDataRef.current : undefined)
+  const isAuthorized = !!effectiveData?.credentials.length
+  const canOAuth = effectiveData?.supported_credential_types.includes(CredentialTypeEnum.OAUTH2)
+  const canApiKey = effectiveData?.supported_credential_types.includes(CredentialTypeEnum.API_KEY)
   const invalidPluginCredentialInfo = useInvalidPluginCredentialInfoHook(pluginPayload)
 
   return {
@@ -25,8 +38,8 @@ export const usePluginAuth = (
     canOAuth,
     canApiKey,
     isLoading,
-    credentials: data?.credentials || [],
-    notAllowCustomCredential: data?.allow_custom_token === false,
+    credentials: effectiveData?.credentials || [],
+    notAllowCustomCredential: effectiveData?.allow_custom_token === false,
     invalidPluginCredentialInfo,
   }
 }

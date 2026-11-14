@@ -17,10 +17,13 @@ const mockCredentialInfo = vi.fn().mockReturnValue({
 
 const mockInvalidate = vi.fn()
 
+const mockIsError = vi.fn().mockReturnValue(false)
+
 vi.mock('../use-credential', () => ({
   useGetPluginCredentialInfoHook: (_payload: unknown, enable?: boolean) => ({
     data: enable ? mockCredentialInfo() : undefined,
     isLoading: false,
+    isError: mockIsError(),
   }),
   useInvalidPluginCredentialInfoHook: () => mockInvalidate,
 }))
@@ -78,5 +81,50 @@ describe('usePluginAuth', () => {
 
     expect(result.current.canApiKey).toBe(true)
     expect(result.current.canOAuth).toBe(false)
+  })
+
+  it('should keep previous credentials while credential info refetches', () => {
+    const { result, rerender } = renderHook(() => usePluginAuth(basePayload, true))
+
+    expect(result.current.isAuthorized).toBe(true)
+    expect(result.current.credentials).toEqual(mockCredentials)
+
+    // Selecting a credential changes the credential-info query key, so the
+    // new query briefly has no data while it refetches. The previously
+    // loaded info must be retained so callers do not unmount their trigger
+    // and drop keyboard focus (langgenius/dify#46384).
+    mockCredentialInfo.mockReturnValue(undefined as never)
+    rerender()
+
+    expect(result.current.isAuthorized).toBe(true)
+    expect(result.current.credentials).toEqual(mockCredentials)
+
+    // clearAllMocks does not reset implementations, so restore the default.
+    mockCredentialInfo.mockReturnValue({
+      credentials: mockCredentials,
+      supported_credential_types: [CredentialTypeEnum.API_KEY, CredentialTypeEnum.OAUTH2],
+      allow_custom_token: true,
+    })
+  })
+
+  it('should drop retained credentials when the refetch errors', () => {
+    const { result, rerender } = renderHook(() => usePluginAuth(basePayload, true))
+
+    expect(result.current.isAuthorized).toBe(true)
+
+    mockCredentialInfo.mockReturnValue(undefined as never)
+    mockIsError.mockReturnValue(true)
+    rerender()
+
+    expect(result.current.isAuthorized).toBe(false)
+    expect(result.current.credentials).toEqual([])
+
+    // clearAllMocks does not reset implementations, so restore the defaults.
+    mockCredentialInfo.mockReturnValue({
+      credentials: mockCredentials,
+      supported_credential_types: [CredentialTypeEnum.API_KEY, CredentialTypeEnum.OAUTH2],
+      allow_custom_token: true,
+    })
+    mockIsError.mockReturnValue(false)
   })
 })
