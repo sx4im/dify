@@ -11,7 +11,7 @@ from dify_agent.layers.execution_context import ApplicationTracingContext, DifyE
 from dify_agent.layers.knowledge import DifyKnowledgeBaseLayerConfig
 from dify_agent.layers.knowledge_fs import DifyKnowledgeFsLayerConfig
 from dify_agent.layers.prompt import Config as PromptConfig
-from dify_agent.layers.shell import DifyShellEnvVarConfig, DifyShellLayerConfig
+from dify_agent.layers.shell import DifyShellCliToolConfig, DifyShellEnvVarConfig, DifyShellLayerConfig
 from dify_agent.layers.user_prompt import DifyUserPromptDownloadConfig, DifyUserPromptImageConfig
 from dify_agent.protocol import (
     DIFY_AGENT_HISTORY_LAYER_ID,
@@ -534,6 +534,31 @@ def test_workflow_request_builder_adds_shell_layer_when_include_shell() -> None:
     assert shell.config["runtime"] == "runtime"
     shell_config = DifyShellLayerConfig.model_validate(shell.config)
     assert shell_config.env[0].name == "PROJECT_NAME"
+
+
+def test_agent_backend_log_redacts_shell_env_values() -> None:
+    run_input = _run_input()
+    run_input.include_shell = True
+    run_input.metadata = {"value": "keep-me"}
+    run_input.shell_config = DifyShellLayerConfig(
+        env=[DifyShellEnvVarConfig(name="DEMO_SECRET", value="dummy-value-123")],
+        cli_tools=[
+            DifyShellCliToolConfig(
+                name="demo",
+                env=[DifyShellEnvVarConfig(name="TOOL_SECRET", value="tool-secret-456")],
+            )
+        ],
+    )
+
+    request = AgentBackendRunRequestBuilder().build_for_workflow_node(run_input)
+    redacted = cast(dict[str, Any], redact_for_agent_backend_log(request))
+    layer = next(item for item in redacted["composition"]["layers"] if item["name"] == DIFY_SHELL_LAYER_ID)
+
+    assert "dummy-value-123" not in json.dumps(redacted)
+    assert "tool-secret-456" not in json.dumps(redacted)
+    assert layer["config"]["env"] == [{"name": "DEMO_SECRET", "value": "[REDACTED]"}]
+    assert layer["config"]["cli_tools"][0]["env"] == [{"name": "TOOL_SECRET", "value": "[REDACTED]"}]
+    assert redacted["metadata"]["value"] == "keep-me"
 
 
 def test_agent_app_request_builder_omits_shell_layer_by_default() -> None:

@@ -592,13 +592,63 @@ class AgentBackendRunRequestBuilder:
 _SENSITIVE_KEY_PARTS = ("secret", "credential", "token", "password", "api_key", "base64_data")
 
 
+def _redact_shell_env_entries(value: object) -> object:
+    """Redact shell env values while preserving names and entry shape.
+
+    Preconditions: ``value`` is the JSON-like ``env`` field from a shell layer
+    or shell CLI tool config. Postconditions: dict entries keep their keys,
+    any ``value`` field is replaced with ``[REDACTED]``, and all other fields
+    are passed through the generic log redactor.
+    """
+    if not isinstance(value, list):
+        return redact_for_agent_backend_log(value)
+    redacted_entries: list[object] = []
+    for entry in value:
+        if isinstance(entry, dict):
+            redacted_entries.append(
+                {
+                    key: "[REDACTED]" if str(key).lower() == "value" else redact_for_agent_backend_log(item)
+                    for key, item in entry.items()
+                }
+            )
+        else:
+            redacted_entries.append(redact_for_agent_backend_log(entry))
+    return redacted_entries
+
+
+def _redact_shell_layer_config(value: object) -> object:
+    """Redact a shell layer config, including env values nested in CLI tools.
+
+    Preconditions: ``value`` is the JSON-like config for the shell layer.
+    Postconditions: the generic credential-key redaction still applies, and
+    shell env values are redacted because inline secret refs are represented
+    as env entries in the wire request.
+    """
+    redacted = redact_for_agent_backend_log(value)
+    if isinstance(redacted, dict):
+        if "env" in redacted:
+            redacted["env"] = _redact_shell_env_entries(redacted["env"])
+        cli_tools = redacted.get("cli_tools")
+        if isinstance(cli_tools, list):
+            for tool in cli_tools:
+                if isinstance(tool, dict) and "env" in tool:
+                    tool["env"] = _redact_shell_env_entries(tool["env"])
+    return redacted
+
+
 def redact_for_agent_backend_log(value: object) -> object:
-    """Return a JSON-like copy with credential-bearing keys redacted for logs/tests."""
+    """Return a JSON-like copy with credential-bearing keys redacted for logs/tests.
+
+    Shell layer env values are also redacted: inline secret refs are sent as
+    env entries, so their values would otherwise remain in persisted request
+    inputs even though the env entry keys are only ``name`` and ``value``.
+    """
     if isinstance(value, BaseModel):
         return redact_for_agent_backend_log(value.model_dump(mode="json", warnings=False))
     if isinstance(value, dict):
         redacted: dict[object, object] = {}
         is_multimodal_file = value.get("type") == "image" and "filename" in value and "mime_type" in value
+        is_shell_layer = value.get("name") == DIFY_SHELL_LAYER_ID and isinstance(value.get("config"), dict)
         for key, item in value.items():
             key_text = str(key).lower()
             if (
@@ -607,6 +657,8 @@ def redact_for_agent_backend_log(value: object) -> object:
                 or (key_text == "tracing" and item is not None)
             ):
                 redacted[key] = "[REDACTED]"
+            elif is_shell_layer and key_text == "config":
+                redacted[key] = _redact_shell_layer_config(item)
             else:
                 redacted[key] = redact_for_agent_backend_log(item)
         return redacted
